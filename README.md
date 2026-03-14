@@ -23,6 +23,30 @@ tasks/                     Plano de execucao e revisao
 - Dashboard React para backlog, jobs, DLQ e workers
 - Simulador React para envio manual, burst e cenarios predefinidos
 
+## Compatibilidade com PostgreSQL
+
+### Matriz de compatibilidade
+
+| Versao | Status | Observacao |
+| --- | --- | --- |
+| 17 | Validado | Versao alvo do projeto e usada nos testes fim a fim desta implementacao. |
+| 12 a 16 | Suportado (alta compatibilidade) | Usa recursos SQL estaveis e maduros nessas versoes. |
+| 9.5 a 11 | Compativel tecnicamente | Funciona pelos recursos minimos necessarios, mas nao e faixa recomendada para producao moderna. |
+
+### Minimo tecnico
+
+O minimo tecnico da solucao e PostgreSQL 9.5, por causa de recursos usados diretamente na implementacao:
+
+- `FOR UPDATE SKIP LOCKED`
+- `INSERT ... ON CONFLICT`
+
+### Recomendacao de uso
+
+- Recomendado: PostgreSQL 14+
+- Ideal: PostgreSQL 17
+
+Essa recomendacao equilibra compatibilidade, estabilidade operacional e ciclo de suporte mais atual.
+
 ## Como subir localmente
 
 ### Opcao rapida (script unico)
