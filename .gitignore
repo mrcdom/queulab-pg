@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Local runtime artifacts
+.tmp/
+.wdc-pg-queue/
+
+# Node
+node_modules/
+dist/
+
+# Java / Maven
+**/target/
+
+# Logs
+*.log
