@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { api, DashboardSnapshot, QueueEventEnvelope, QueueJob, QueueStatus, WorkerSnapshot } from './lib/api';
+import { api, DashboardSnapshot, EventChannelMetrics, QueueEventEnvelope, QueueJob, QueueStatus, WorkerSnapshot } from './lib/api';
 import { MetricCard } from './components/MetricCard';
 import { SectionCard } from './components/SectionCard';
 import { DataTable } from './components/DataTable';
@@ -61,6 +61,7 @@ export default function App() {
   const [burstUseDedup, setBurstUseDedup] = useState(false);
   const [burstRepeatDedup, setBurstRepeatDedup] = useState(false);
   const [eventConnectionState, setEventConnectionState] = useState<ConnectionState>('disconnected');
+  const [eventMetrics, setEventMetrics] = useState<EventChannelMetrics | null>(null);
   const eventClientRef = useRef<QueueEventClient | null>(null);
   const jobsRef = useRef<QueueJob[]>([]);
   const dlqRef = useRef<QueueJob[]>([]);
@@ -79,17 +80,19 @@ export default function App() {
         params.set('search', search);
       }
 
-      const [nextDashboard, nextJobs, nextDlq, nextWorkers] = await Promise.all([
+      const [nextDashboard, nextJobs, nextDlq, nextWorkers, nextMetrics] = await Promise.all([
         api.dashboardSnapshot(),
         api.jobs(params),
         api.dlq(),
         api.workers(),
+        api.eventsMetrics().catch(() => null),
       ]);
 
       setDashboard(nextDashboard);
       setJobs(nextJobs);
       setDlq(nextDlq);
       setWorkers(nextWorkers);
+      setEventMetrics(nextMetrics);
       if (selectedJob) {
         const refreshedSelection = nextJobs.find((job) => job.id === selectedJob.id) ?? nextDlq.find((job) => job.id === selectedJob.id) ?? null;
         setSelectedJob(refreshedSelection);
@@ -103,6 +106,20 @@ export default function App() {
   useEffect(() => {
     void loadAll();
   }, [queueFilter, statusFilter, search]);
+
+  useEffect(() => {
+    if (eventConnectionState === 'connected') {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadAll();
+    }, 4000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [eventConnectionState, queueFilter, statusFilter, search]);
 
   useEffect(() => {
     jobsRef.current = jobs;
@@ -335,6 +352,21 @@ export default function App() {
                   ))}
                 </DataTable>
               </SectionCard>
+
+              {eventMetrics !== null ? (
+                <SectionCard title="Canal de eventos" subtitle="Métricas de publicação e conectividade do canal WebSocket + outbox.">
+                  <div className="metric-grid">
+                    <MetricCard label="Publicados" value={String(eventMetrics.publishedTotal)} />
+                    <MetricCard label="Taxa (ev/s)" value={eventMetrics.publishedRatePerSecond.toFixed(2)} />
+                    <MetricCard
+                      label="Falhas de publicação"
+                      value={String(eventMetrics.publishFailuresTotal)}
+                      tone={eventMetrics.publishFailuresTotal > 0 ? 'danger' : 'default'}
+                    />
+                    <MetricCard label="Conexões WS" value={String(eventMetrics.activeWebSocketConnections)} tone="accent" />
+                  </div>
+                </SectionCard>
+              ) : null}
             </>
           ) : null}
 

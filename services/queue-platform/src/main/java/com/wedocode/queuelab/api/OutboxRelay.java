@@ -1,5 +1,6 @@
 package com.wedocode.queuelab.api;
 
+import com.wedocode.queuelab.core.JsonSupport;
 import com.wedocode.queuelab.core.QueueRepository;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -11,12 +12,14 @@ public final class OutboxRelay {
   private static final Logger LOGGER = LoggerFactory.getLogger(OutboxRelay.class);
   private final QueueRepository repository;
   private final QueueEventHub eventHub;
+  private final EventChannelMetrics metrics;
   private final ScheduledExecutorService scheduler;
   private volatile boolean started;
 
-  public OutboxRelay(QueueRepository repository, QueueEventHub eventHub) {
+  public OutboxRelay(QueueRepository repository, QueueEventHub eventHub, EventChannelMetrics metrics) {
     this.repository = repository;
     this.eventHub = eventHub;
+    this.metrics = metrics;
     this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
       var thread = new Thread(runnable, "outbox-relay");
       thread.setDaemon(true);
@@ -45,14 +48,23 @@ public final class OutboxRelay {
       var events = repository.claimPendingOutboxEvents(100);
       for (var event : events) {
         try {
-          eventHub.broadcast(event.payload());
+          eventHub.broadcast(toStreamPayload(event.outboxId(), event.payload()));
           repository.markOutboxSent(event.outboxId());
+          metrics.recordPublished();
         } catch (Exception exception) {
           repository.markOutboxFailed(event.outboxId(), exception.getMessage());
+          metrics.recordPublishFailure();
         }
       }
     } catch (Exception exception) {
       LOGGER.warn("Falha no relay de eventos da outbox", exception);
     }
+  }
+
+  private String toStreamPayload(long outboxId, String payload) throws Exception {
+    var root = JsonSupport.MAPPER.createObjectNode();
+    root.put("outboxId", outboxId);
+    root.set("event", JsonSupport.MAPPER.readTree(payload));
+    return JsonSupport.MAPPER.writeValueAsString(root);
   }
 }
