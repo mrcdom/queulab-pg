@@ -177,3 +177,11 @@ Este plano prioriza execução por IA com passos determinísticos, artefatos ver
 - [x] Registrar falhas por gate e ações corretivas aplicadas.
 - [x] Tarefas concluídas nesta execução: A10-A14, A20-A25, A30-A34, G01-G04.
 - [x] Falhas encontradas e corrigidas: assinatura de handlers WS do Javalin, verificação de sessão WS e SQL de enqueue com `job_version`.
+## Revisão da Correção de Lacunas (2026-03-15)
+
+- [x] FIX-C01 - Corrigir replay curto por cursor no frontend com persistência local (`localStorage`) e reconexão.
+- [x] FIX-C02 - Incluir `outboxId` no payload do canal WebSocket para permitir avanço de cursor em tempo real.
+- [x] FIX-C03 - Expor métricas operacionais de eventos no backend (`/api/observability/events`).
+- [x] FIX-C04 - Reforçar fallback por polling quando canal WebSocket não estiver conectado.
+- [x] Validação backend: `mvn -q -f services/queue-platform/pom.xml test`.
+- [x] Validação frontend: `npm --prefix apps/web-console run build`.

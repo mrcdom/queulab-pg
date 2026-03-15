@@ -71,6 +71,15 @@ export interface OutboxEvent {
   payload: string;
 }
 
+export interface EventChannelMetrics {
+  publishedTotal: number;
+  publishFailuresTotal: number;
+  publishedRatePerSecond: number;
+  activeWebSocketConnections: number;
+  startedAt: string;
+  now: string;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:7070';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -98,6 +107,7 @@ export const api = {
   job: (jobId: number) => request<QueueJob>(`/api/jobs/${jobId}`),
   dlq: () => request<QueueJob[]>('/api/dlq'),
   workers: () => request<WorkerSnapshot[]>('/api/workers'),
+  eventsMetrics: () => request<EventChannelMetrics>('/api/observability/events'),
   eventsSince: (cursor: number, limit = 100) => request<OutboxEvent[]>(`/api/events/since?cursor=${cursor}&limit=${limit}`),
   enqueue: (payload: Record<string, unknown>) => request<{ jobId: number; created: boolean }>('/api/jobs', {
     method: 'POST',

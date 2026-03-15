@@ -7,6 +7,13 @@ export interface QueueEventClientOptions {
   onStateChange: (state: ConnectionState) => void;
 }
 
+interface QueueEventStreamMessage {
+  outboxId: number;
+  event: QueueEventEnvelope;
+}
+
+const CURSOR_STORAGE_KEY = 'queue.events.cursor';
+
 export class QueueEventClient {
   private readonly options: QueueEventClientOptions;
   private socket: WebSocket | null = null;
@@ -18,6 +25,7 @@ export class QueueEventClient {
 
   constructor(options: QueueEventClientOptions) {
     this.options = options;
+    this.lastCursor = this.readPersistedCursor();
   }
 
   start() {
@@ -49,10 +57,13 @@ export class QueueEventClient {
     this.socket = new WebSocket(socketUrl);
 
     this.socket.onopen = () => {
-      this.options.onStateChange('connected');
-      this.replaySinceCursor().catch(() => {
-        // Reconcile via polling even if replay fails.
-      });
+      this.replaySinceCursor()
+        .catch(() => {
+          // Polling fallback will recover eventual consistency.
+        })
+        .finally(() => {
+          this.options.onStateChange('connected');
+        });
     };
 
     this.socket.onclose = () => {
@@ -70,16 +81,24 @@ export class QueueEventClient {
     };
 
     this.socket.onmessage = (message) => {
-      try {
-        const event = JSON.parse(message.data) as QueueEventEnvelope;
-        this.handleEvent(event);
-      } catch {
-        // Ignore invalid payloads.
-      }
+      this.handleIncomingMessage(message.data);
     };
   }
 
-  private handleEvent(event: QueueEventEnvelope) {
+  private handleIncomingMessage(rawPayload: unknown) {
+    try {
+      const parsed = JSON.parse(String(rawPayload)) as unknown;
+      const streamMessage = normalizeStreamMessage(parsed);
+      if (streamMessage === null) {
+        return;
+      }
+      this.handleEvent(streamMessage.event, streamMessage.outboxId);
+    } catch {
+      // Ignore invalid payloads.
+    }
+  }
+
+  private handleEvent(event: QueueEventEnvelope, outboxId?: number) {
     if (this.seenEvents.has(event.eventId)) {
       return;
     }
@@ -87,11 +106,17 @@ export class QueueEventClient {
     const currentVersion = this.latestJobVersion.get(event.jobId) ?? 0;
     if (event.jobVersion <= currentVersion) {
       this.seenEvents.add(event.eventId);
+      if (outboxId !== undefined) {
+        this.registerOutboxCursor(outboxId);
+      }
       return;
     }
 
     this.seenEvents.add(event.eventId);
     this.latestJobVersion.set(event.jobId, event.jobVersion);
+    if (outboxId !== undefined) {
+      this.registerOutboxCursor(outboxId);
+    }
     this.options.onEvent(event);
   }
 
@@ -100,18 +125,31 @@ export class QueueEventClient {
       return;
     }
 
-    const events = await api.eventsSince(this.lastCursor, 200);
-    for (const row of events) {
-      this.lastCursor = Math.max(this.lastCursor, row.outboxId);
-      const event = JSON.parse(row.payload) as QueueEventEnvelope;
-      this.handleEvent(event);
+    let cursor = this.lastCursor;
+    while (true) {
+      const events = await api.eventsSince(cursor, 200);
+      if (events.length === 0) {
+        break;
+      }
+
+      for (const row of events) {
+        cursor = Math.max(cursor, row.outboxId);
+        const parsed = JSON.parse(row.payload) as QueueEventEnvelope;
+        this.handleEvent(parsed, row.outboxId);
+      }
+
+      if (events.length < 200) {
+        break;
+      }
     }
   }
 
   public registerOutboxCursor(outboxId: number) {
-    if (outboxId > this.lastCursor) {
-      this.lastCursor = outboxId;
+    if (outboxId <= this.lastCursor) {
+      return;
     }
+    this.lastCursor = outboxId;
+    this.persistCursor(this.lastCursor);
   }
 
   private scheduleReconnect() {
@@ -123,6 +161,27 @@ export class QueueEventClient {
       this.connect();
     }, 1000);
   }
+
+  private readPersistedCursor(): number {
+    try {
+      const raw = window.localStorage.getItem(CURSOR_STORAGE_KEY);
+      if (raw === null) {
+        return 0;
+      }
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private persistCursor(cursor: number) {
+    try {
+      window.localStorage.setItem(CURSOR_STORAGE_KEY, String(cursor));
+    } catch {
+      // Ignore local storage write failures.
+    }
+  }
 }
 
 function resolveSocketUrl(): string {
@@ -130,4 +189,27 @@ function resolveSocketUrl(): string {
   const resolvedBase = new URL(apiBase, window.location.origin);
   const socketProtocol = resolvedBase.protocol === 'https:' ? 'wss:' : 'ws:';
   return new URL('/api/events/ws', `${socketProtocol}//${resolvedBase.host}`).toString();
+}
+
+function normalizeStreamMessage(payload: unknown): QueueEventStreamMessage | null {
+  if (typeof payload !== 'object' || payload === null) {
+    return null;
+  }
+
+  const candidate = payload as Record<string, unknown>;
+  if (typeof candidate.outboxId === 'number' && typeof candidate.event === 'object' && candidate.event !== null) {
+    return {
+      outboxId: candidate.outboxId,
+      event: candidate.event as QueueEventEnvelope,
+    };
+  }
+
+  if (typeof candidate.eventId === 'string') {
+    return {
+      outboxId: 0,
+      event: candidate as unknown as QueueEventEnvelope,
+    };
+  }
+
+  return null;
 }

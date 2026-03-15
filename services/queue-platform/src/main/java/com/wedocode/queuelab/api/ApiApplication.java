@@ -23,7 +23,8 @@ public final class ApiApplication {
     var repository = new QueueRepository(dataSource);
     var service = new QueueService(repository, config);
     var eventHub = new QueueEventHub();
-    var outboxRelay = new OutboxRelay(repository, eventHub);
+    var eventMetrics = new EventChannelMetrics();
+    var outboxRelay = new OutboxRelay(repository, eventHub, eventMetrics);
     outboxRelay.start();
 
     WorkerRuntime embeddedRuntime = null;
@@ -56,6 +57,7 @@ public final class ApiApplication {
         .ifPresentOrElse(ctx::json, () -> ctx.status(HttpStatus.NOT_FOUND).json(Map.of("message", "Job nao encontrado"))));
     app.get("/api/dlq", ctx -> ctx.json(service.jobs(optional(ctx.queryParam("queueName")), optional("FAILED"), optional(ctx.queryParam("search")), 100)));
     app.get("/api/workers", ctx -> ctx.json(service.workers()));
+    app.get("/api/observability/events", ctx -> ctx.json(eventMetrics.snapshot(eventHub.activeConnections())));
     app.get("/api/events/since", ctx -> {
       var cursor = ctx.queryParamAsClass("cursor", Long.class).getOrDefault(0L);
       var limit = Math.min(Math.max(ctx.queryParamAsClass("limit", Integer.class).getOrDefault(100), 1), 500);
