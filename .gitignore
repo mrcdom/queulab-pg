@@ -12,5 +12,10 @@ dist/
 # Java / Maven
 **/target/
 
+# Eclipse
+.project
+.classpath
+.settings/
+
 # Logs
 *.log
