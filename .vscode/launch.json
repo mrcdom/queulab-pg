@@ -1,0 +1,110 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "QueueLab API (workers embutidos)",
+      "request": "launch",
+      "mainClass": "com.wedocode.queuelab.api.ApiApplication",
+      "projectName": "queue-platform",
+      "cwd": "${workspaceFolder}/services/queue-platform",
+      "env": {
+        "QUEUE_DB_URL": "jdbc:postgresql://localhost:5432/queue_lab",
+        "QUEUE_DB_USER": "postgres",
+        "QUEUE_DB_PASSWORD": "admin",
+        "QUEUE_API_PORT": "7070",
+        "QUEUE_START_EMBEDDED_WORKERS": "true",
+        "QUEUE_WORKER_THREADS": "3",
+        "QUEUE_CLAIM_BATCH_SIZE": "10",
+        "QUEUE_FALLBACK_POLL_MS": "4000",
+        "QUEUE_IDLE_SLEEP_MS": "750",
+        "QUEUE_PROCESSING_TIMEOUT_SECONDS": "90",
+        "QUEUE_HEARTBEAT_SECONDS": "10"
+      }
+    },
+    {
+      "type": "java",
+      "name": "QueueLab API (sem workers)",
+      "request": "launch",
+      "mainClass": "com.wedocode.queuelab.api.ApiApplication",
+      "projectName": "queue-platform",
+      "cwd": "${workspaceFolder}/services/queue-platform",
+      "env": {
+        "QUEUE_DB_URL": "jdbc:postgresql://localhost:5432/queue_lab",
+        "QUEUE_DB_USER": "postgres",
+        "QUEUE_DB_PASSWORD": "admin",
+        "QUEUE_API_PORT": "7070",
+        "QUEUE_START_EMBEDDED_WORKERS": "false"
+      }
+    },
+    {
+      "type": "java",
+      "name": "QueueLab Worker",
+      "request": "launch",
+      "mainClass": "com.wedocode.queuelab.worker.WorkerApplication",
+      "projectName": "queue-platform",
+      "cwd": "${workspaceFolder}/services/queue-platform",
+      "env": {
+        "QUEUE_DB_URL": "jdbc:postgresql://localhost:5432/queue_lab",
+        "QUEUE_DB_USER": "postgres",
+        "QUEUE_DB_PASSWORD": "admin",
+        "QUEUE_WORKER_THREADS": "3",
+        "QUEUE_CLAIM_BATCH_SIZE": "10",
+        "QUEUE_FALLBACK_POLL_MS": "4000",
+        "QUEUE_IDLE_SLEEP_MS": "750",
+        "QUEUE_PROCESSING_TIMEOUT_SECONDS": "90",
+        "QUEUE_HEARTBEAT_SECONDS": "10"
+      }
+    },
+    {
+      "type": "java",
+      "name": "QueueLab Migration",
+      "request": "launch",
+      "mainClass": "com.wedocode.queuelab.core.MigrationApplication",
+      "projectName": "queue-platform",
+      "cwd": "${workspaceFolder}/services/queue-platform",
+      "env": {
+        "QUEUE_DB_URL": "jdbc:postgresql://localhost:5432/queue_lab",
+        "QUEUE_DB_USER": "postgres",
+        "QUEUE_DB_PASSWORD": "admin",
+        "QUEUE_MIGRATIONS_PATH": "${workspaceFolder}/database/migrations"
+      }
+    },
+    {
+      "type": "java",
+      "name": "QueueLab Database Bootstrap",
+      "request": "launch",
+      "mainClass": "com.wedocode.queuelab.core.DatabaseBootstrapApplication",
+      "projectName": "queue-platform",
+      "cwd": "${workspaceFolder}/services/queue-platform",
+      "env": {
+        "QUEUE_ADMIN_DB_URL": "jdbc:postgresql://localhost:5432/postgres",
+        "QUEUE_DB_USER": "postgres",
+        "QUEUE_DB_PASSWORD": "admin",
+        "QUEUE_TARGET_DB": "queue_lab"
+      }
+    },
+    {
+      "type": "java",
+      "name": "QueueLab DB Smoke Check",
+      "request": "launch",
+      "mainClass": "com.wedocode.queuelab.core.DbSmokeCheckApplication",
+      "projectName": "queue-platform",
+      "cwd": "${workspaceFolder}/services/queue-platform",
+      "env": {
+        "QUEUE_DB_URL": "jdbc:postgresql://localhost:5432/queue_lab",
+        "QUEUE_DB_USER": "postgres",
+        "QUEUE_DB_PASSWORD": "admin"
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "QueueLab API + Worker",
+      "configurations": [
+        "QueueLab API (sem workers)",
+        "QueueLab Worker"
+      ]
+    }
+  ]
+}

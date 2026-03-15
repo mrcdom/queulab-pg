@@ -8,18 +8,18 @@ public final class MigrationApplication {
   }
 
   public static void main(String[] args) {
-    AppConfig config = AppConfig.fromEnv();
-    String pathFromEnv = System.getenv("QUEUE_MIGRATIONS_PATH");
-    Path migrationsPath = Path.of(pathFromEnv == null || pathFromEnv.isBlank()
+    var config = AppConfig.fromEnv();
+    var pathFromEnv = System.getenv("QUEUE_MIGRATIONS_PATH");
+    var migrationsPath = Path.of(pathFromEnv == null || pathFromEnv.isBlank()
         ? "../../database/migrations"
         : pathFromEnv)
         .toAbsolutePath()
         .normalize();
 
-    Flyway flyway = Flyway.configure()
+    var flyway = Flyway.configure()
         .dataSource(config.jdbcUrl(), config.dbUser(), config.dbPassword())
         .locations("filesystem:" + migrationsPath)
-      .baselineOnMigrate(false)
+        .baselineOnMigrate(false)
         .load();
 
     flyway.migrate();

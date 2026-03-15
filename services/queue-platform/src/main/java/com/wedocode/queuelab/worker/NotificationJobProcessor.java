@@ -13,9 +13,9 @@ public final class NotificationJobProcessor implements JobProcessor {
 
   @Override
   public void process(QueueJob job) throws TransientProcessingException, PermanentProcessingException {
-    JsonNode payload = job.payload();
-    String channel = text(payload, "channel");
-    String recipient = text(payload, "recipient");
+    var payload = job.payload();
+    var channel = text(payload, "channel");
+    var recipient = text(payload, "recipient");
 
     if (channel == null || recipient == null) {
       throw new PermanentProcessingException("Payload invalido: channel e recipient sao obrigatorios");
@@ -27,7 +27,7 @@ public final class NotificationJobProcessor implements JobProcessor {
       throw new PermanentProcessingException("Falha permanente simulada para o canal " + channel);
     }
 
-    int transientFailuresBeforeSuccess = payload.path("transientFailuresBeforeSuccess").asInt(0);
+    var transientFailuresBeforeSuccess = payload.path("transientFailuresBeforeSuccess").asInt(0);
     if (job.attempts() < transientFailuresBeforeSuccess) {
       throw new TransientProcessingException("Falha transitoria simulada para " + recipient + " na tentativa " + (job.attempts() + 1));
     }
@@ -47,7 +47,7 @@ public final class NotificationJobProcessor implements JobProcessor {
   }
 
   private String text(JsonNode payload, String fieldName) {
-    JsonNode node = payload.get(fieldName);
+    var node = payload.get(fieldName);
     if (node == null || node.isNull() || node.asText().isBlank()) {
       return null;
     }

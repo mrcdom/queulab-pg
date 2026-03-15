@@ -3,8 +3,6 @@ package com.wedocode.queuelab.worker;
 import com.wedocode.queuelab.core.AppConfig;
 import com.wedocode.queuelab.core.QueueJob;
 import com.wedocode.queuelab.core.QueueRepository;
-import java.sql.Connection;
-import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -15,7 +13,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 import org.postgresql.PGConnection;
-import org.postgresql.PGNotification;
 
 public final class WorkerRuntime {
   private final DataSource dataSource;
@@ -45,8 +42,8 @@ public final class WorkerRuntime {
     listenerThread.start();
 
     for (int index = 0; index < config.workerThreads(); index++) {
-      String workerId = "worker-" + runtimeId + "-" + index;
-      Thread thread = new Thread(() -> runWorkerLoop(workerId), workerId);
+      var workerId = "worker-" + runtimeId + "-" + index;
+      var thread = new Thread(() -> runWorkerLoop(workerId), workerId);
       workerThreads.add(thread);
       thread.start();
     }
@@ -87,7 +84,7 @@ public final class WorkerRuntime {
           nextHeartbeatAt = now + TimeUnit.SECONDS.toNanos(config.heartbeatIntervalSeconds());
         }
 
-        List<QueueJob> jobs = repository.claimReadyJobs(workerId, config.claimBatchSize());
+        var jobs = repository.claimReadyJobs(workerId, config.claimBatchSize());
         if (jobs.isEmpty()) {
           repository.reconcileStuckJobs(Duration.ofSeconds(config.processingTimeoutSeconds()));
           waitForSignal();
@@ -107,7 +104,7 @@ public final class WorkerRuntime {
   }
 
   private void processSingleJob(String workerId, QueueJob job) {
-    Instant startedAt = Instant.now();
+    var startedAt = Instant.now();
     try {
       processor.process(job);
       repository.markDone(job.id(), workerId);
@@ -141,12 +138,12 @@ public final class WorkerRuntime {
 
   private void listenForNotifications() {
     while (running.get()) {
-      try (Connection connection = dataSource.getConnection();
-           Statement statement = connection.createStatement()) {
+      try (var connection = dataSource.getConnection();
+           var statement = connection.createStatement()) {
         statement.execute("LISTEN job_queue_new");
-        PGConnection pgConnection = connection.unwrap(PGConnection.class);
+        var pgConnection = connection.unwrap(PGConnection.class);
         while (running.get()) {
-          PGNotification[] notifications = pgConnection.getNotifications(config.fallbackPollMillis());
+          var notifications = pgConnection.getNotifications(config.fallbackPollMillis());
           if (notifications != null && notifications.length > 0) {
             wakeAllWorkers();
           }

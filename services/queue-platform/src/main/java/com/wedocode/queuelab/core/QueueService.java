@@ -2,7 +2,6 @@ package com.wedocode.queuelab.core;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -29,7 +28,7 @@ public final class QueueService {
   }
 
   public List<QueueJob> jobs(Optional<String> queueName, Optional<String> status, Optional<String> search, int limit) {
-    Optional<QueueStatus> parsedStatus = status.map(value -> QueueStatus.valueOf(value.toUpperCase(Locale.ROOT)));
+    var parsedStatus = status.map(value -> QueueStatus.valueOf(value.toUpperCase(Locale.ROOT)));
     return repository.listJobs(queueName, parsedStatus, search, Math.min(Math.max(limit, 1), 500));
   }
 
@@ -57,12 +56,12 @@ public final class QueueService {
     int created = 0;
     int deduplicated = 0;
     for (int index = 0; index < command.count(); index++) {
-      JsonNode payload = createPayloadFromBurst(command, index);
-      String dedupKey = command.useDeduplication()
+      var payload = createPayloadFromBurst(command, index);
+      var dedupKey = command.useDeduplication()
           ? command.dedupPrefix() + ":" + (command.repeatDedupKey() ? 0 : index)
           : null;
 
-      QueueRepository.EnqueueResult result = enqueue(new EnqueueCommand(
+      var result = enqueue(new EnqueueCommand(
           command.queueName(),
           dedupKey,
           payload,
@@ -81,7 +80,7 @@ public final class QueueService {
   }
 
   public BurstResult enqueueScenario(String scenarioName) {
-    String normalized = scenarioName.toLowerCase(Locale.ROOT);
+    var normalized = scenarioName.toLowerCase(Locale.ROOT);
     return switch (normalized) {
       case "happy-path" -> enqueueBurst(new BurstCommand("notification.send", 20, 0, 0, false, false, "happy-path", null, 6));
       case "transient-failures" -> enqueueBurst(new BurstCommand("notification.send", 18, 2, 0, false, false, "transient", null, 6));
@@ -93,7 +92,7 @@ public final class QueueService {
   }
 
   private JsonNode createPayloadFromBurst(BurstCommand command, int index) {
-    ObjectNode payload = JsonNodeFactory.instance.objectNode();
+    var payload = JsonNodeFactory.instance.objectNode();
     payload.put("notificationId", UUID.randomUUID().toString());
     payload.put("channel", pickChannel(index));
     payload.put("recipient", "demo+" + index + "@queue-lab.local");

@@ -1,11 +1,9 @@
 package com.wedocode.queuelab.core;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Duration;
@@ -13,7 +11,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import javax.sql.DataSource;
 import org.postgresql.util.PGobject;
@@ -26,15 +23,15 @@ public final class QueueRepository {
   }
 
   public EnqueueResult enqueue(QueueService.EnqueueCommand command) {
-    String insertSql = """
+    var insertSql = """
         INSERT INTO job_queue (queue_name, dedup_key, payload, available_at, max_attempts)
         VALUES (?, ?, ?, COALESCE(?, NOW()), ?)
         ON CONFLICT DO NOTHING
         RETURNING id
         """;
 
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(insertSql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.prepareStatement(insertSql)) {
       statement.setString(1, command.queueName());
       if (command.dedupKey() == null || command.dedupKey().isBlank()) {
         statement.setNull(2, Types.VARCHAR);
@@ -49,7 +46,7 @@ public final class QueueRepository {
       }
       statement.setInt(5, command.maxAttempts());
 
-      try (ResultSet resultSet = statement.executeQuery()) {
+      try (var resultSet = statement.executeQuery()) {
         if (resultSet.next()) {
           return new EnqueueResult(resultSet.getLong("id"), true);
         }
@@ -62,7 +59,7 @@ public final class QueueRepository {
       throw new IllegalStateException("Falha ao enfileirar job sem dedup_key e sem retorno do insert");
     }
 
-    String findExistingSql = """
+    var findExistingSql = """
         SELECT id
         FROM job_queue
         WHERE queue_name = ?
@@ -72,12 +69,12 @@ public final class QueueRepository {
         LIMIT 1
         """;
 
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(findExistingSql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.prepareStatement(findExistingSql)) {
       statement.setString(1, command.queueName());
       statement.setString(2, command.dedupKey());
 
-      try (ResultSet resultSet = statement.executeQuery()) {
+      try (var resultSet = statement.executeQuery()) {
         if (resultSet.next()) {
           return new EnqueueResult(resultSet.getLong("id"), false);
         }
@@ -90,7 +87,7 @@ public final class QueueRepository {
   }
 
   public List<QueueJob> claimReadyJobs(String workerId, int limit) {
-    String sql = """
+    var sql = """
         WITH candidates AS (
           SELECT id
           FROM job_queue
@@ -110,13 +107,13 @@ public final class QueueRepository {
         RETURNING q.*
         """;
 
-    try (Connection connection = dataSource.getConnection()) {
+    try (var connection = dataSource.getConnection()) {
       connection.setAutoCommit(false);
-      try (PreparedStatement statement = connection.prepareStatement(sql)) {
+      try (var statement = connection.prepareStatement(sql)) {
         statement.setInt(1, limit);
         statement.setString(2, workerId);
-        List<QueueJob> jobs = new ArrayList<>();
-        try (ResultSet resultSet = statement.executeQuery()) {
+        var jobs = new ArrayList<QueueJob>();
+        try (var resultSet = statement.executeQuery()) {
           while (resultSet.next()) {
             jobs.add(mapJob(resultSet));
           }
@@ -135,7 +132,7 @@ public final class QueueRepository {
   }
 
   public void markDone(long jobId, String workerId) {
-    String sql = """
+    var sql = """
         UPDATE job_queue
         SET status = 'DONE'::queue_status,
             locked_at = NULL,
@@ -152,7 +149,7 @@ public final class QueueRepository {
   }
 
   public RetryResult scheduleRetry(long jobId, String workerId, String errorMessage) {
-    String sql = """
+    var sql = """
         UPDATE job_queue
         SET attempts = attempts + 1,
             status = CASE
@@ -173,12 +170,12 @@ public final class QueueRepository {
         RETURNING status, attempts, available_at
         """;
 
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.prepareStatement(sql)) {
       statement.setString(1, errorMessage);
       statement.setLong(2, jobId);
       statement.setString(3, workerId);
-      try (ResultSet resultSet = statement.executeQuery()) {
+      try (var resultSet = statement.executeQuery()) {
         if (resultSet.next()) {
           return new RetryResult(
               QueueStatus.valueOf(resultSet.getString("status")),
@@ -194,7 +191,7 @@ public final class QueueRepository {
   }
 
   public void markFailed(long jobId, String workerId, String errorMessage) {
-    String sql = """
+    var sql = """
         UPDATE job_queue
         SET attempts = attempts + 1,
             status = 'FAILED'::queue_status,
@@ -214,7 +211,7 @@ public final class QueueRepository {
   }
 
   public int reconcileStuckJobs(Duration timeout) {
-    String sql = """
+    var sql = """
         UPDATE job_queue
         SET status = 'RETRY'::queue_status,
             locked_at = NULL,
@@ -226,8 +223,8 @@ public final class QueueRepository {
           AND locked_at < NOW() - (? * INTERVAL '1 second')
         """;
 
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.prepareStatement(sql)) {
       statement.setLong(1, timeout.getSeconds());
       return statement.executeUpdate();
     } catch (SQLException exception) {
@@ -236,15 +233,15 @@ public final class QueueRepository {
   }
 
   public DashboardSnapshot fetchDashboard() {
-    Map<QueueStatus, Long> statusCounts = new EnumMap<>(QueueStatus.class);
+    var statusCounts = new EnumMap<QueueStatus, Long>(QueueStatus.class);
     for (QueueStatus status : QueueStatus.values()) {
       statusCounts.put(status, 0L);
     }
 
-    String countsSql = "SELECT status, count(*) AS total FROM job_queue GROUP BY status";
-    try (Connection connection = dataSource.getConnection();
-         Statement statement = connection.createStatement();
-         ResultSet resultSet = statement.executeQuery(countsSql)) {
+        var countsSql = "SELECT status, count(*) AS total FROM job_queue GROUP BY status";
+        try (var connection = dataSource.getConnection();
+          var statement = connection.createStatement();
+          var resultSet = statement.executeQuery(countsSql)) {
       while (resultSet.next()) {
         statusCounts.put(QueueStatus.valueOf(resultSet.getString("status")), resultSet.getLong("total"));
       }
@@ -252,8 +249,8 @@ public final class QueueRepository {
       throw new IllegalStateException("Nao foi possivel consultar os contadores do dashboard", exception);
     }
 
-    List<QueueBacklog> backlogs = new ArrayList<>();
-    String backlogSql = """
+    var backlogs = new ArrayList<QueueBacklog>();
+    var backlogSql = """
         SELECT queue_name,
          count(*) FILTER (WHERE status IN ('PENDING'::queue_status, 'RETRY'::queue_status) AND available_at <= NOW()) AS ready_jobs,
          count(*) FILTER (WHERE status = 'PROCESSING'::queue_status) AS processing_jobs,
@@ -262,9 +259,9 @@ public final class QueueRepository {
         GROUP BY queue_name
         ORDER BY queue_name
         """;
-    try (Connection connection = dataSource.getConnection();
-         Statement statement = connection.createStatement();
-         ResultSet resultSet = statement.executeQuery(backlogSql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.createStatement();
+          var resultSet = statement.executeQuery(backlogSql)) {
       while (resultSet.next()) {
         backlogs.add(new QueueBacklog(
             resultSet.getString("queue_name"),
@@ -289,8 +286,8 @@ public final class QueueRepository {
   }
 
   public List<QueueJob> listJobs(Optional<String> queueName, Optional<QueueStatus> status, Optional<String> search, int limit) {
-    StringBuilder sql = new StringBuilder("SELECT * FROM job_queue WHERE 1 = 1");
-    List<Object> parameters = new ArrayList<>();
+    var sql = new StringBuilder("SELECT * FROM job_queue WHERE 1 = 1");
+    var parameters = new ArrayList<Object>();
 
     queueName.ifPresent(value -> {
       sql.append(" AND queue_name = ?");
@@ -302,7 +299,7 @@ public final class QueueRepository {
     });
     search.filter(value -> !value.isBlank()).ifPresent(value -> {
       sql.append(" AND (dedup_key ILIKE ? OR payload::text ILIKE ? OR COALESCE(locked_by, '') ILIKE ?)");
-      String token = "%" + value + "%";
+      var token = "%" + value + "%";
       parameters.add(token);
       parameters.add(token);
       parameters.add(token);
@@ -311,11 +308,11 @@ public final class QueueRepository {
     sql.append(" ORDER BY available_at ASC, id DESC LIMIT ?");
     parameters.add(limit);
 
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql.toString())) {
       bindParameters(statement, parameters);
-      try (ResultSet resultSet = statement.executeQuery()) {
-        List<QueueJob> jobs = new ArrayList<>();
+      try (var resultSet = statement.executeQuery()) {
+        var jobs = new ArrayList<QueueJob>();
         while (resultSet.next()) {
           jobs.add(mapJob(resultSet));
         }
@@ -327,11 +324,11 @@ public final class QueueRepository {
   }
 
   public Optional<QueueJob> findJobById(long jobId) {
-    String sql = "SELECT * FROM job_queue WHERE id = ?";
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(sql)) {
+      var sql = "SELECT * FROM job_queue WHERE id = ?";
+      try (var connection = dataSource.getConnection();
+        var statement = connection.prepareStatement(sql)) {
       statement.setLong(1, jobId);
-      try (ResultSet resultSet = statement.executeQuery()) {
+      try (var resultSet = statement.executeQuery()) {
         if (resultSet.next()) {
           return Optional.of(mapJob(resultSet));
         }
@@ -343,11 +340,11 @@ public final class QueueRepository {
   }
 
   public List<WorkerSnapshot> listWorkers() {
-    String sql = "SELECT * FROM worker_registry ORDER BY last_heartbeat_at DESC";
-    try (Connection connection = dataSource.getConnection();
-         Statement statement = connection.createStatement();
-         ResultSet resultSet = statement.executeQuery(sql)) {
-      List<WorkerSnapshot> workers = new ArrayList<>();
+    var sql = "SELECT * FROM worker_registry ORDER BY last_heartbeat_at DESC";
+    try (var connection = dataSource.getConnection();
+         var statement = connection.createStatement();
+         var resultSet = statement.executeQuery(sql)) {
+      var workers = new ArrayList<WorkerSnapshot>();
       while (resultSet.next()) {
         workers.add(new WorkerSnapshot(
             resultSet.getString("worker_id"),
@@ -365,7 +362,7 @@ public final class QueueRepository {
   }
 
   public void registerWorker(String workerId) {
-    String sql = """
+    var sql = """
         INSERT INTO worker_registry (worker_id, last_heartbeat_at, status)
         VALUES (?, NOW(), 'ACTIVE')
         ON CONFLICT (worker_id) DO UPDATE
@@ -376,24 +373,24 @@ public final class QueueRepository {
   }
 
   public void heartbeatWorker(String workerId) {
-    String sql = "UPDATE worker_registry SET last_heartbeat_at = NOW(), status = 'ACTIVE' WHERE worker_id = ?";
+    var sql = "UPDATE worker_registry SET last_heartbeat_at = NOW(), status = 'ACTIVE' WHERE worker_id = ?";
     executeMutation(sql, statement -> statement.setString(1, workerId), "Nao foi possivel atualizar heartbeat");
   }
 
   public void updateWorkerStats(String workerId, boolean success) {
-    String sql = success
+    var sql = success
         ? "UPDATE worker_registry SET processed_count = processed_count + 1, last_heartbeat_at = NOW() WHERE worker_id = ?"
         : "UPDATE worker_registry SET failed_count = failed_count + 1, last_heartbeat_at = NOW() WHERE worker_id = ?";
     executeMutation(sql, statement -> statement.setString(1, workerId), "Nao foi possivel atualizar estatisticas do worker");
   }
 
   public void markWorkerStopped(String workerId) {
-    String sql = "UPDATE worker_registry SET status = 'STOPPED', last_heartbeat_at = NOW() WHERE worker_id = ?";
+    var sql = "UPDATE worker_registry SET status = 'STOPPED', last_heartbeat_at = NOW() WHERE worker_id = ?";
     executeMutation(sql, statement -> statement.setString(1, workerId), "Nao foi possivel marcar worker como parado");
   }
 
   public void recordExecution(long jobId, String workerId, int attemptNumber, String outcome, String errorMessage, Instant startedAt, Instant finishedAt) {
-    String sql = """
+    var sql = """
         INSERT INTO job_execution_history (job_id, worker_id, attempt_number, outcome, error_message, started_at, finished_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """;
@@ -413,7 +410,7 @@ public final class QueueRepository {
   }
 
   public boolean requeueJob(long jobId) {
-    String sql = """
+    var sql = """
         UPDATE job_queue
         SET status = 'RETRY'::queue_status,
             attempts = 0,
@@ -426,8 +423,8 @@ public final class QueueRepository {
           AND status = 'FAILED'::queue_status
         """;
 
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.prepareStatement(sql)) {
       statement.setLong(1, jobId);
       return statement.executeUpdate() > 0;
     } catch (SQLException exception) {
@@ -462,16 +459,16 @@ public final class QueueRepository {
   }
 
   private PGobject jsonb(JsonNode payload) throws SQLException {
-    PGobject object = new PGobject();
+    var object = new PGobject();
     object.setType("jsonb");
     object.setValue(payload.toString());
     return object;
   }
 
   private long scalarLong(String sql) {
-    try (Connection connection = dataSource.getConnection();
-         Statement statement = connection.createStatement();
-         ResultSet resultSet = statement.executeQuery(sql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.createStatement();
+          var resultSet = statement.executeQuery(sql)) {
       resultSet.next();
       return resultSet.getLong(1);
     } catch (SQLException exception) {
@@ -480,9 +477,9 @@ public final class QueueRepository {
   }
 
   private double scalarDouble(String sql) {
-    try (Connection connection = dataSource.getConnection();
-         Statement statement = connection.createStatement();
-         ResultSet resultSet = statement.executeQuery(sql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.createStatement();
+          var resultSet = statement.executeQuery(sql)) {
       resultSet.next();
       return resultSet.getDouble(1);
     } catch (SQLException exception) {
@@ -491,8 +488,8 @@ public final class QueueRepository {
   }
 
   private void executeMutation(String sql, SqlConsumer consumer, String errorMessage) {
-    try (Connection connection = dataSource.getConnection();
-         PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (var connection = dataSource.getConnection();
+          var statement = connection.prepareStatement(sql)) {
       consumer.accept(statement);
       statement.executeUpdate();
     } catch (SQLException exception) {
@@ -502,8 +499,8 @@ public final class QueueRepository {
 
   private void bindParameters(PreparedStatement statement, List<Object> parameters) throws SQLException {
     for (int index = 0; index < parameters.size(); index++) {
-      Object value = parameters.get(index);
-      int parameterIndex = index + 1;
+      var value = parameters.get(index);
+      var parameterIndex = index + 1;
       if (value instanceof String stringValue) {
         statement.setString(parameterIndex, stringValue);
       } else if (value instanceof Integer integerValue) {

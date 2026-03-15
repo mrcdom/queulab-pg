@@ -35,12 +35,12 @@ public record AppConfig(
   }
 
   private static String env(String key, String fallback) {
-    String value = System.getenv(key);
+    var value = System.getenv(key);
     return value == null || value.isBlank() ? fallback : value;
   }
 
   private static int envInt(String key, int fallback) {
-    String value = System.getenv(key);
+    var value = System.getenv(key);
     if (value == null || value.isBlank()) {
       return fallback;
     }
@@ -48,7 +48,7 @@ public record AppConfig(
   }
 
   private static boolean envBoolean(String key, boolean fallback) {
-    String value = System.getenv(key);
+    var value = System.getenv(key);
     if (value == null || value.isBlank()) {
       return fallback;
     }

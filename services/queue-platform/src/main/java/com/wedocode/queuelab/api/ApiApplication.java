@@ -12,17 +12,16 @@ import io.javalin.http.HttpStatus;
 import io.javalin.json.JavalinJackson;
 import java.time.Instant;
 import java.util.Map;
-import javax.sql.DataSource;
 
 public final class ApiApplication {
   private ApiApplication() {
   }
 
   public static void main(String[] args) {
-    AppConfig config = AppConfig.fromEnv();
-    DataSource dataSource = DataSourceFactory.create(config);
-    QueueRepository repository = new QueueRepository(dataSource);
-    QueueService service = new QueueService(repository, config);
+    var config = AppConfig.fromEnv();
+    var dataSource = DataSourceFactory.create(config);
+    var repository = new QueueRepository(dataSource);
+    var service = new QueueService(repository, config);
 
     WorkerRuntime embeddedRuntime = null;
     if (config.startEmbeddedWorkers()) {
@@ -30,8 +29,8 @@ public final class ApiApplication {
       embeddedRuntime.start();
     }
 
-    WorkerRuntime runtimeReference = embeddedRuntime;
-    Javalin app = Javalin.create(configuration -> {
+    var runtimeReference = embeddedRuntime;
+    var app = Javalin.create(configuration -> {
       configuration.jsonMapper(new JavalinJackson());
       configuration.showJavalinBanner = false;
       configuration.http.defaultContentType = "application/json";
@@ -55,8 +54,8 @@ public final class ApiApplication {
     app.get("/api/workers", ctx -> ctx.json(service.workers()));
 
     app.post("/api/jobs", ctx -> {
-      EnqueueRequest request = ctx.bodyAsClass(EnqueueRequest.class);
-      QueueRepository.EnqueueResult result = service.enqueue(new QueueService.EnqueueCommand(
+      var request = ctx.bodyAsClass(EnqueueRequest.class);
+      var result = service.enqueue(new QueueService.EnqueueCommand(
           request.queueName(),
           request.dedupKey(),
           request.payload(),
@@ -79,8 +78,8 @@ public final class ApiApplication {
     app.post("/api/admin/reconcile", ctx -> ctx.json(Map.of("recovered", service.reconcileNow())));
 
     app.post("/api/simulator/burst", ctx -> {
-      BurstRequest request = ctx.bodyAsClass(BurstRequest.class);
-      QueueService.BurstResult result = service.enqueueBurst(new QueueService.BurstCommand(
+      var request = ctx.bodyAsClass(BurstRequest.class);
+      var result = service.enqueueBurst(new QueueService.BurstCommand(
           request.queueName() == null || request.queueName().isBlank() ? "notification.send" : request.queueName(),
           request.count() == null ? 10 : request.count(),
           request.transientFailuresBeforeSuccess() == null ? 0 : request.transientFailuresBeforeSuccess(),
@@ -95,7 +94,7 @@ public final class ApiApplication {
     });
 
     app.post("/api/simulator/scenarios/{scenario}", ctx -> {
-      QueueService.BurstResult result = service.enqueueScenario(ctx.pathParam("scenario"));
+      var result = service.enqueueScenario(ctx.pathParam("scenario"));
       ctx.status(HttpStatus.CREATED).json(result);
     });
 

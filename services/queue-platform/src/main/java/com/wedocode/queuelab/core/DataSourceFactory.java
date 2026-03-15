@@ -9,7 +9,7 @@ public final class DataSourceFactory {
   }
 
   public static DataSource create(AppConfig config) {
-    HikariConfig hikariConfig = new HikariConfig();
+    var hikariConfig = new HikariConfig();
     hikariConfig.setJdbcUrl(config.jdbcUrl());
     hikariConfig.setUsername(config.dbUser());
     hikariConfig.setPassword(config.dbPassword());
