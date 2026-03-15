@@ -1,6 +1,10 @@
 package com.wedocode.queuelab.core;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.wedocode.queuelab.core.events.OutboxEvent;
+import com.wedocode.queuelab.core.events.QueueEventEnvelope;
+import com.wedocode.queuelab.core.events.QueueEventType;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -12,6 +16,7 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import javax.sql.DataSource;
 import org.postgresql.util.PGobject;
 
@@ -22,16 +27,17 @@ public final class QueueRepository {
     this.dataSource = dataSource;
   }
 
-  public EnqueueResult enqueue(QueueService.EnqueueCommand command) {
+  public EnqueueResult enqueue(QueueService.EnqueueCommand command, String correlationId) {
     var insertSql = """
-        INSERT INTO job_queue (queue_name, dedup_key, payload, available_at, max_attempts)
-        VALUES (?, ?, ?, COALESCE(?, NOW()), ?)
+        INSERT INTO job_queue (queue_name, dedup_key, payload, available_at, max_attempts, job_version)
+        VALUES (?, ?, ?, COALESCE(?, NOW()), ?, ?)
         ON CONFLICT DO NOTHING
-        RETURNING id
+        RETURNING id, queue_name, job_version
         """;
 
-        try (var connection = dataSource.getConnection();
-          var statement = connection.prepareStatement(insertSql)) {
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(insertSql)) {
+      connection.setAutoCommit(false);
       statement.setString(1, command.queueName());
       if (command.dedupKey() == null || command.dedupKey().isBlank()) {
         statement.setNull(2, Types.VARCHAR);
@@ -45,12 +51,33 @@ public final class QueueRepository {
         statement.setTimestamp(4, Timestamp.from(command.availableAt()));
       }
       statement.setInt(5, command.maxAttempts());
+      statement.setLong(6, 1L);
 
       try (var resultSet = statement.executeQuery()) {
         if (resultSet.next()) {
-          return new EnqueueResult(resultSet.getLong("id"), true);
+          var jobId = resultSet.getLong("id");
+          var queueName = resultSet.getString("queue_name");
+          var jobVersion = resultSet.getLong("job_version");
+          var payload = JsonNodeFactory.instance.objectNode();
+          payload.put("created", true);
+          insertOutboxEvent(connection, QueueEventEnvelope.of(
+              QueueEventType.JOB_CREATED,
+              UUID.randomUUID().toString(),
+              Instant.now(),
+              "queue-platform",
+              correlationId,
+              queueName,
+              jobId,
+              jobVersion,
+              payload
+          ));
+          connection.commit();
+          connection.setAutoCommit(true);
+          return new EnqueueResult(jobId, true);
         }
       }
+      connection.commit();
+      connection.setAutoCommit(true);
     } catch (SQLException exception) {
       throw new IllegalStateException("Nao foi possivel enfileirar o job", exception);
     }
@@ -86,7 +113,7 @@ public final class QueueRepository {
     throw new IllegalStateException("Falha ao enfileirar job e localizar deduplicacao");
   }
 
-  public List<QueueJob> claimReadyJobs(String workerId, int limit) {
+  public List<QueueJob> claimReadyJobs(String workerId, int limit, String correlationId) {
     var sql = """
         WITH candidates AS (
           SELECT id
@@ -101,6 +128,7 @@ public final class QueueRepository {
         SET status = 'PROCESSING'::queue_status,
             locked_at = NOW(),
             locked_by = ?,
+            job_version = q.job_version + 1,
             updated_at = NOW()
         FROM candidates
         WHERE q.id = candidates.id
@@ -118,6 +146,22 @@ public final class QueueRepository {
             jobs.add(mapJob(resultSet));
           }
         }
+        for (var job : jobs) {
+          var payload = JsonNodeFactory.instance.objectNode();
+          payload.put("workerId", workerId);
+          payload.put("attempt", job.attempts() + 1);
+          insertOutboxEvent(connection, QueueEventEnvelope.of(
+              QueueEventType.JOB_CLAIMED,
+              UUID.randomUUID().toString(),
+              Instant.now(),
+              "queue-platform",
+              correlationId,
+              job.queueName(),
+              job.id(),
+              job.jobVersion(),
+              payload
+          ));
+        }
         connection.commit();
         return jobs;
       } catch (SQLException exception) {
@@ -131,24 +175,53 @@ public final class QueueRepository {
     }
   }
 
-  public void markDone(long jobId, String workerId) {
+  public QueueJob markDone(long jobId, String workerId, String correlationId) {
     var sql = """
         UPDATE job_queue
         SET status = 'DONE'::queue_status,
             locked_at = NULL,
             locked_by = NULL,
+            job_version = job_version + 1,
             updated_at = NOW()
         WHERE id = ?
           AND status = 'PROCESSING'::queue_status
           AND locked_by = ?
+        RETURNING *
         """;
-    executeMutation(sql, statement -> {
+
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
       statement.setLong(1, jobId);
       statement.setString(2, workerId);
-    }, "Nao foi possivel marcar job como DONE");
+      try (var resultSet = statement.executeQuery()) {
+        if (!resultSet.next()) {
+          throw new IllegalStateException("Job nao encontrado para marcar DONE");
+        }
+        var updated = mapJob(resultSet);
+        var payload = JsonNodeFactory.instance.objectNode();
+        payload.put("workerId", workerId);
+        insertOutboxEvent(connection, QueueEventEnvelope.of(
+            QueueEventType.JOB_COMPLETED,
+            UUID.randomUUID().toString(),
+            Instant.now(),
+            "queue-platform",
+            correlationId,
+            updated.queueName(),
+            updated.id(),
+            updated.jobVersion(),
+            payload
+        ));
+        connection.commit();
+        connection.setAutoCommit(true);
+        return updated;
+      }
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Nao foi possivel marcar job como DONE", exception);
+    }
   }
 
-  public RetryResult scheduleRetry(long jobId, String workerId, String errorMessage) {
+  public RetryResult scheduleRetry(long jobId, String workerId, String errorMessage, String correlationId) {
     var sql = """
         UPDATE job_queue
         SET attempts = attempts + 1,
@@ -163,25 +236,48 @@ public final class QueueRepository {
             last_error = ?,
             locked_at = NULL,
             locked_by = NULL,
+            job_version = job_version + 1,
             updated_at = NOW()
         WHERE id = ?
           AND status = 'PROCESSING'::queue_status
           AND locked_by = ?
-        RETURNING status, attempts, available_at
+        RETURNING *
         """;
 
-        try (var connection = dataSource.getConnection();
-          var statement = connection.prepareStatement(sql)) {
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
       statement.setString(1, errorMessage);
       statement.setLong(2, jobId);
       statement.setString(3, workerId);
       try (var resultSet = statement.executeQuery()) {
         if (resultSet.next()) {
-          return new RetryResult(
-              QueueStatus.valueOf(resultSet.getString("status")),
-              resultSet.getInt("attempts"),
-              resultSet.getTimestamp("available_at").toInstant()
-          );
+          var updated = mapJob(resultSet);
+          var payload = JsonNodeFactory.instance.objectNode();
+          payload.put("workerId", workerId);
+          payload.put("attempt", updated.attempts());
+          payload.put("availableAt", updated.availableAt().toString());
+
+          var eventType = updated.status() == QueueStatus.FAILED
+              ? QueueEventType.JOB_FAILED
+              : QueueEventType.JOB_RETRY_SCHEDULED;
+
+          insertOutboxEvent(connection, QueueEventEnvelope.of(
+              eventType,
+              UUID.randomUUID().toString(),
+              Instant.now(),
+              "queue-platform",
+              correlationId,
+              updated.queueName(),
+              updated.id(),
+              updated.jobVersion(),
+              payload
+          ));
+
+          connection.commit();
+          connection.setAutoCommit(true);
+
+          return new RetryResult(updated.status(), updated.attempts(), updated.availableAt(), updated);
         }
       }
       throw new IllegalStateException("Job nao encontrado para retry");
@@ -190,7 +286,7 @@ public final class QueueRepository {
     }
   }
 
-  public void markFailed(long jobId, String workerId, String errorMessage) {
+  public QueueJob markFailed(long jobId, String workerId, String errorMessage, String correlationId) {
     var sql = """
         UPDATE job_queue
         SET attempts = attempts + 1,
@@ -198,35 +294,90 @@ public final class QueueRepository {
             last_error = ?,
             locked_at = NULL,
             locked_by = NULL,
+            job_version = job_version + 1,
             updated_at = NOW()
         WHERE id = ?
           AND status = 'PROCESSING'::queue_status
           AND locked_by = ?
+        RETURNING *
         """;
-    executeMutation(sql, statement -> {
+
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
       statement.setString(1, errorMessage);
       statement.setLong(2, jobId);
       statement.setString(3, workerId);
-    }, "Nao foi possivel marcar job como FAILED");
+      try (var resultSet = statement.executeQuery()) {
+        if (!resultSet.next()) {
+          throw new IllegalStateException("Job nao encontrado para marcar FAILED");
+        }
+        var updated = mapJob(resultSet);
+        var payload = JsonNodeFactory.instance.objectNode();
+        payload.put("workerId", workerId);
+        payload.put("error", errorMessage == null ? "" : errorMessage);
+        insertOutboxEvent(connection, QueueEventEnvelope.of(
+            QueueEventType.JOB_FAILED,
+            UUID.randomUUID().toString(),
+            Instant.now(),
+            "queue-platform",
+            correlationId,
+            updated.queueName(),
+            updated.id(),
+            updated.jobVersion(),
+            payload
+        ));
+        connection.commit();
+        connection.setAutoCommit(true);
+        return updated;
+      }
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Nao foi possivel marcar job como FAILED", exception);
+    }
   }
 
-  public int reconcileStuckJobs(Duration timeout) {
+  public int reconcileStuckJobs(Duration timeout, String correlationId) {
     var sql = """
         UPDATE job_queue
         SET status = 'RETRY'::queue_status,
             locked_at = NULL,
             locked_by = NULL,
             available_at = NOW(),
+            job_version = job_version + 1,
             updated_at = NOW(),
             last_error = COALESCE(last_error, 'Reconciliado apos timeout de processamento')
         WHERE status = 'PROCESSING'::queue_status
           AND locked_at < NOW() - (? * INTERVAL '1 second')
+        RETURNING *
         """;
 
-        try (var connection = dataSource.getConnection();
-          var statement = connection.prepareStatement(sql)) {
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
       statement.setLong(1, timeout.getSeconds());
-      return statement.executeUpdate();
+      var recovered = 0;
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          var updated = mapJob(resultSet);
+          var payload = JsonNodeFactory.instance.objectNode();
+          payload.put("reason", "processing-timeout");
+          insertOutboxEvent(connection, QueueEventEnvelope.of(
+              QueueEventType.JOB_RECOVERED,
+              UUID.randomUUID().toString(),
+              Instant.now(),
+              "queue-platform",
+              correlationId,
+              updated.queueName(),
+              updated.id(),
+              updated.jobVersion(),
+              payload
+          ));
+          recovered++;
+        }
+      }
+      connection.commit();
+      connection.setAutoCommit(true);
+      return recovered;
     } catch (SQLException exception) {
       throw new IllegalStateException("Nao foi possivel reconciliar jobs presos", exception);
     }
@@ -409,7 +560,7 @@ public final class QueueRepository {
     }, "Nao foi possivel registrar historico de execucao");
   }
 
-  public boolean requeueJob(long jobId) {
+  public boolean requeueJob(long jobId, String correlationId) {
     var sql = """
         UPDATE job_queue
         SET status = 'RETRY'::queue_status,
@@ -418,17 +569,148 @@ public final class QueueRepository {
             locked_at = NULL,
             locked_by = NULL,
             last_error = NULL,
+            job_version = job_version + 1,
             updated_at = NOW()
         WHERE id = ?
           AND status = 'FAILED'::queue_status
+        RETURNING *
         """;
 
-        try (var connection = dataSource.getConnection();
-          var statement = connection.prepareStatement(sql)) {
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
       statement.setLong(1, jobId);
-      return statement.executeUpdate() > 0;
+      try (var resultSet = statement.executeQuery()) {
+        if (!resultSet.next()) {
+          connection.commit();
+          connection.setAutoCommit(true);
+          return false;
+        }
+        var updated = mapJob(resultSet);
+        var payload = JsonNodeFactory.instance.objectNode();
+        payload.put("action", "manual-requeue");
+        insertOutboxEvent(connection, QueueEventEnvelope.of(
+            QueueEventType.JOB_REQUEUED,
+            UUID.randomUUID().toString(),
+            Instant.now(),
+            "queue-platform",
+            correlationId,
+            updated.queueName(),
+            updated.id(),
+            updated.jobVersion(),
+            payload
+        ));
+        connection.commit();
+        connection.setAutoCommit(true);
+        return true;
+      }
     } catch (SQLException exception) {
       throw new IllegalStateException("Nao foi possivel reenfileirar o job", exception);
+    }
+  }
+
+  public List<OutboxEvent> claimPendingOutboxEvents(int limit) {
+    var sql = """
+        WITH candidates AS (
+          SELECT outbox_id
+          FROM event_outbox
+          WHERE status = 'PENDING'
+            AND next_attempt_at <= NOW()
+          ORDER BY outbox_id
+          FOR UPDATE SKIP LOCKED
+          LIMIT ?
+        )
+        UPDATE event_outbox outbox
+        SET status = 'SENDING',
+            attempts = outbox.attempts + 1,
+            updated_at = NOW()
+        FROM candidates
+        WHERE outbox.outbox_id = candidates.outbox_id
+        RETURNING outbox.outbox_id, outbox.event_id, outbox.aggregate_id, outbox.aggregate_version, outbox.occurred_at, outbox.payload::text
+        """;
+
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
+      statement.setInt(1, limit);
+      var events = new ArrayList<OutboxEvent>();
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          events.add(new OutboxEvent(
+              resultSet.getLong("outbox_id"),
+              resultSet.getString("event_id"),
+              resultSet.getLong("aggregate_id"),
+              resultSet.getLong("aggregate_version"),
+              resultSet.getTimestamp("occurred_at").toInstant(),
+              resultSet.getString("payload")
+          ));
+        }
+      }
+      connection.commit();
+      connection.setAutoCommit(true);
+      return events;
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Nao foi possivel reservar eventos da outbox", exception);
+    }
+  }
+
+  public void markOutboxSent(long outboxId) {
+    var sql = """
+        UPDATE event_outbox
+        SET status = 'SENT',
+            sent_at = NOW(),
+            updated_at = NOW(),
+            last_error = NULL
+        WHERE outbox_id = ?
+        """;
+    executeMutation(sql, statement -> statement.setLong(1, outboxId), "Nao foi possivel marcar outbox como enviada");
+  }
+
+  public void markOutboxFailed(long outboxId, String errorMessage) {
+    var sql = """
+        UPDATE event_outbox
+        SET status = 'PENDING',
+            next_attempt_at = NOW() + make_interval(secs => LEAST((2 ^ LEAST(attempts, 8))::int, 60)),
+            updated_at = NOW(),
+            last_error = ?
+        WHERE outbox_id = ?
+        """;
+    executeMutation(sql, statement -> {
+      statement.setString(1, errorMessage == null ? "Erro de publicacao" : errorMessage);
+      statement.setLong(2, outboxId);
+    }, "Nao foi possivel registrar falha de envio da outbox");
+  }
+
+  public List<OutboxEvent> listEventsSince(long cursor, int limit) {
+    var sql = """
+        SELECT outbox_id, event_id, aggregate_id, aggregate_version, occurred_at, payload::text
+        FROM event_outbox
+        WHERE outbox_id > ?
+          AND status = 'SENT'
+        ORDER BY outbox_id
+        LIMIT ?
+        """;
+
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      statement.setLong(1, cursor);
+      statement.setInt(2, limit);
+      var events = new ArrayList<OutboxEvent>();
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          events.add(new OutboxEvent(
+              resultSet.getLong("outbox_id"),
+              resultSet.getString("event_id"),
+              resultSet.getLong("aggregate_id"),
+              resultSet.getLong("aggregate_version"),
+              resultSet.getTimestamp("occurred_at").toInstant(),
+              resultSet.getString("payload")
+          ));
+        }
+      }
+      return events;
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Nao foi possivel listar eventos por cursor", exception);
     }
   }
 
@@ -436,6 +718,7 @@ public final class QueueRepository {
     try {
       return new QueueJob(
           resultSet.getLong("id"),
+          resultSet.getLong("job_version"),
           resultSet.getString("queue_name"),
           resultSet.getString("dedup_key"),
           JsonSupport.MAPPER.readTree(resultSet.getString("payload")),
@@ -463,6 +746,22 @@ public final class QueueRepository {
     object.setType("jsonb");
     object.setValue(payload.toString());
     return object;
+  }
+
+  private void insertOutboxEvent(java.sql.Connection connection, QueueEventEnvelope envelope) throws SQLException {
+    var sql = """
+        INSERT INTO event_outbox (event_id, aggregate_type, aggregate_id, aggregate_version, occurred_at, payload)
+        VALUES (?, 'job', ?, ?, ?, ?)
+        """;
+
+    try (var statement = connection.prepareStatement(sql)) {
+      statement.setString(1, envelope.eventId());
+      statement.setLong(2, envelope.jobId());
+      statement.setLong(3, envelope.jobVersion());
+      statement.setTimestamp(4, Timestamp.from(envelope.occurredAt()));
+      statement.setObject(5, jsonb(JsonSupport.MAPPER.valueToTree(envelope)));
+      statement.executeUpdate();
+    }
   }
 
   private long scalarLong(String sql) {
@@ -519,6 +818,6 @@ public final class QueueRepository {
   public record EnqueueResult(long jobId, boolean created) {
   }
 
-  public record RetryResult(QueueStatus status, int attempts, Instant availableAt) {
+  public record RetryResult(QueueStatus status, int attempts, Instant availableAt, QueueJob job) {
   }
 }

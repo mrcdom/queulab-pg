@@ -84,9 +84,9 @@ public final class WorkerRuntime {
           nextHeartbeatAt = now + TimeUnit.SECONDS.toNanos(config.heartbeatIntervalSeconds());
         }
 
-        var jobs = repository.claimReadyJobs(workerId, config.claimBatchSize());
+        var jobs = repository.claimReadyJobs(workerId, config.claimBatchSize(), correlationId("claim", workerId, 0));
         if (jobs.isEmpty()) {
-          repository.reconcileStuckJobs(Duration.ofSeconds(config.processingTimeoutSeconds()));
+          repository.reconcileStuckJobs(Duration.ofSeconds(config.processingTimeoutSeconds()), correlationId("reconcile", workerId, 0));
           waitForSignal();
           continue;
         }
@@ -104,25 +104,30 @@ public final class WorkerRuntime {
   }
 
   private void processSingleJob(String workerId, QueueJob job) {
+    var correlationId = correlationId("job", workerId, job.id());
     var startedAt = Instant.now();
     try {
       processor.process(job);
-      repository.markDone(job.id(), workerId);
+      repository.markDone(job.id(), workerId, correlationId);
       repository.recordExecution(job.id(), workerId, job.attempts() + 1, "DONE", null, startedAt, Instant.now());
       repository.updateWorkerStats(workerId, true);
     } catch (TransientProcessingException exception) {
-      repository.scheduleRetry(job.id(), workerId, exception.getMessage());
+      repository.scheduleRetry(job.id(), workerId, exception.getMessage(), correlationId);
       repository.recordExecution(job.id(), workerId, job.attempts() + 1, "RETRY", exception.getMessage(), startedAt, Instant.now());
       repository.updateWorkerStats(workerId, false);
     } catch (PermanentProcessingException exception) {
-      repository.markFailed(job.id(), workerId, exception.getMessage());
+      repository.markFailed(job.id(), workerId, exception.getMessage(), correlationId);
       repository.recordExecution(job.id(), workerId, job.attempts() + 1, "FAILED", exception.getMessage(), startedAt, Instant.now());
       repository.updateWorkerStats(workerId, false);
     } catch (RuntimeException exception) {
-      repository.scheduleRetry(job.id(), workerId, "Erro inesperado: " + exception.getMessage());
+      repository.scheduleRetry(job.id(), workerId, "Erro inesperado: " + exception.getMessage(), correlationId);
       repository.recordExecution(job.id(), workerId, job.attempts() + 1, "RETRY", exception.getMessage(), startedAt, Instant.now());
       repository.updateWorkerStats(workerId, false);
     }
+  }
+
+  private String correlationId(String prefix, String workerId, long jobId) {
+    return prefix + ":" + workerId + ":" + jobId + ":" + UUID.randomUUID();
   }
 
   private void waitForSignal() {

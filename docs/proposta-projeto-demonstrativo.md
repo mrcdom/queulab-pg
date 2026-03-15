@@ -409,3 +409,173 @@ A melhor forma de demonstrar a arquitetura proposta e construir uma plataforma p
 - um aplicativo simulador para gerar trafego, falhas e cenarios reproduziveis
 
 Completando esses dois aplicativos com uma API em Java + Javalin, workers concorrentes em Java e o modelo SQL sobre Postgres 17, o projeto passa a mostrar nao apenas que PostgreSQL pode sustentar filas com seguranca, mas tambem como operar esse modelo com previsibilidade.
+
+## 17. Proposta de Contrato de Eventos Hibrido (Postgres + WebSocket)
+
+Esta proposta adiciona um barramento de eventos operacionais via WebSocket sem alterar a premissa central da arquitetura:
+
+- Postgres continua como fonte de verdade da fila
+- `LISTEN/NOTIFY` continua acordando workers
+- WebSocket passa a atender UX em tempo real para monitor e simulador
+
+### 17.1 Objetivo da abordagem hibrida
+
+Permitir duas origens de sinalizacao, com papeis diferentes:
+
+1. Eventos vindos do banco: notificar alteracoes reais de estado persistido da fila.
+2. Eventos vindos da aplicacao: notificar intencoes e progresso de operacao na camada de API/UI.
+
+Regra de ouro:
+
+- evento de aplicacao nunca substitui estado persistido
+- todo estado oficial de job e lido do Postgres
+
+### 17.2 Canais e tipos de evento
+
+Canal WebSocket unico sugerido: `queue.events.v1`.
+
+Eventos de dominio da fila (sempre apos commit):
+
+- `job.created`
+- `job.claimed`
+- `job.retry_scheduled`
+- `job.completed`
+- `job.failed`
+- `job.requeued`
+- `job.recovered`
+
+Eventos de operacao da aplicacao (telemetria de acao de usuario/sistema):
+
+- `operation.accepted`
+- `operation.rejected`
+- `operation.started`
+- `operation.finished`
+
+### 17.3 Envelope padrao do evento
+
+```json
+{
+  "eventId": "01JQEV6WE8MR7S8K8B6K3R5XK9",
+  "eventType": "job.retry_scheduled",
+  "eventVersion": 1,
+  "occurredAt": "2026-03-15T14:20:10.123Z",
+  "source": "queue-platform",
+  "correlationId": "5f7602b5-1f2e-4938-95db-e7af9d02e32b",
+  "queueName": "notifications.email",
+  "jobId": 123456,
+  "jobVersion": 7,
+  "payload": {
+    "attempt": 3,
+    "maxAttempts": 8,
+    "availableAt": "2026-03-15T14:21:10.000Z",
+    "workerId": "worker-a"
+  }
+}
+```
+
+Campos obrigatorios:
+
+- `eventId`: ULID/UUID unico para deduplicacao no cliente.
+- `eventType`: tipo de evento.
+- `occurredAt`: instante oficial do evento.
+- `queueName` e `jobId`: chave de agregacao.
+- `jobVersion`: versao monotonicamente crescente por job.
+- `correlationId`: correlacao entre chamada API, processamento e eventos.
+
+### 17.4 Ordenacao, idempotencia e consistencia
+
+1. Ordenacao global nao e exigida.
+2. Ordenacao por job e exigida por `jobVersion`.
+3. Cliente deve ignorar evento com `jobVersion` menor que a ja aplicada.
+4. Cliente deve deduplicar por `eventId`.
+5. Em caso de lacuna de versao, cliente solicita snapshot HTTP do job.
+
+Com isso, eventos WebSocket viram aceleradores de atualizacao, e nao dependencia de consistencia.
+
+### 17.5 Momento de publicacao (evitar evento fantasma)
+
+Publicar evento somente depois de commit de transacao.
+
+Fluxo recomendado:
+
+1. API/worker executa mudanca de estado no Postgres.
+2. Transacao e confirmada.
+3. Aplicacao publica evento no WebSocket.
+
+Opcao robusta para evolucao:
+
+- usar tabela de outbox de eventos e publisher dedicado para entrega confiavel.
+
+### 17.6 Papel do LISTEN/NOTIFY no modelo hibrido
+
+- `LISTEN/NOTIFY` continua sendo mecanismo primario de wake-up de worker.
+- WebSocket nao acorda worker e nao substitui polling de fallback.
+- Se `NOTIFY` falhar ou atrasar, workers ainda processam por polling periodico.
+
+### 17.7 Contratos HTTP de reconciliacao
+
+Para fechar lacunas de eventos no frontend:
+
+- `GET /api/jobs/{jobId}`: estado atual oficial.
+- `GET /api/dashboard/snapshot`: visao consolidada.
+- `GET /api/events/since?cursor=...`: opcional para replay curto.
+
+Recomendacao de cliente:
+
+1. abrir WebSocket
+2. aplicar eventos recebidos
+3. a cada intervalo fixo, reconciliar com snapshot HTTP
+4. em qualquer conflito, prevalece retorno HTTP
+
+### 17.8 Estados e transicoes aceitas
+
+Estados validos:
+
+- `PENDING`, `PROCESSING`, `RETRY`, `DONE`, `FAILED`
+
+Transicoes validas:
+
+- `PENDING -> PROCESSING`
+- `PROCESSING -> DONE`
+- `PROCESSING -> RETRY`
+- `RETRY -> PROCESSING`
+- `PROCESSING -> FAILED`
+- `FAILED -> PENDING` (requeue manual)
+
+Eventos devem refletir apenas transicoes validas para impedir drift semantico entre backend e frontend.
+
+### 17.9 Seguranca e governanca
+
+1. WebSocket autenticado (token de sessao/JWT).
+2. Mascarar dados sensiveis no `payload` de evento.
+3. Definir TTL de retencao para historico de eventos, se houver.
+4. Limitar taxa de publicacao por conexao para evitar saturacao de UI.
+
+### 17.10 Plano de implementacao incremental
+
+Fase 1 (base):
+
+1. Definir envelope `queue.events.v1`.
+2. Publicar `job.created`, `job.completed`, `job.failed`.
+3. Atualizar monitor React com consumo WebSocket + fallback por polling.
+
+Fase 2 (operacional):
+
+1. Adicionar `job.claimed`, `job.retry_scheduled`, `job.recovered`, `job.requeued`.
+2. Incluir `jobVersion` e regras de deduplicacao no frontend.
+3. Adicionar endpoint de snapshot por job para reconciliacao.
+
+Fase 3 (confiabilidade):
+
+1. Introduzir outbox de eventos.
+2. Implementar replay curto por cursor.
+3. Instrumentar metricas de lag, duplicidade e perda de eventos percebida no cliente.
+
+### 17.11 Resultado esperado
+
+Com esta proposta, a solucao permanece simples e robusta:
+
+- persistencia e consistencia no Postgres
+- wake-up de workers por `LISTEN/NOTIFY`
+- experiencia em tempo real para usuarios via WebSocket
+- reconciliacao deterministica para tolerar perda, duplicidade e reordenacao de eventos

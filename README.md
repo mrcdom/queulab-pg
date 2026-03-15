@@ -221,6 +221,63 @@ VITE_API_BASE_URL=http://localhost:7070 npm run dev
 - `POST /api/simulator/burst`
 - `POST /api/simulator/scenarios/{scenario}`
 
+## Benchmark de capacidade (AI-first)
+
+Para medir capacidade de processamento com criterios objetivos (throughput sustentavel, crescimento de backlog, eficiencia e taxa de falha), execute:
+
+```bash
+./scripts/run-capacity-benchmark-ai.sh
+```
+
+O script:
+
+1. Aplica migracoes.
+2. Roda uma matriz de carga por `workers x rate`.
+3. Coleta amostras operacionais em CSV.
+4. Calcula `PASS/FAIL` por ponto.
+5. Gera o resultado de capacidade segura.
+
+Arquivos de saida:
+
+- `.tmp/capacity-benchmark-<timestamp>/summary.csv`
+- `.tmp/capacity-benchmark-<timestamp>/samples.csv`
+- `.tmp/capacity-benchmark-<timestamp>/capacity-result.txt`
+- `.tmp/capacity-benchmark-<timestamp>/capacity-report.md`
+
+Variaveis configuraveis:
+
+- `WORKER_THREADS_LIST` (padrao: `1 2 4 8`)
+- `TARGET_RATES` (padrao: `25 50 100 150 200`)
+- `WARMUP_SECONDS` (padrao: `60`)
+- `MEASURE_SECONDS` (padrao: `180`)
+- `SAMPLE_INTERVAL_SECONDS` (padrao: `5`)
+- `MAX_BACKLOG_GROWTH` (padrao: `5`)
+- `MAX_FAILED_RATE` (padrao: `0.005`)
+- `MIN_EFFICIENCY` (padrao: `0.90`)
+- `DB_RESET_MODE` (`auto`, `required`, `off`; padrao: `auto`)
+- `PSQL_PATH` (caminho absoluto do `psql`, opcional)
+
+Observacao para execucao por IA:
+
+- Se o ambiente nao tiver `psql`, o script segue em `DB_RESET_MODE=auto` sem `TRUNCATE` e isola os testes por nome de fila por rodada.
+- Para forcar a instalacao local do PostgreSQL 17: `PSQL_PATH=/Users/mrcdom/Works/services/pgsql17/bin/psql`.
+
+## Perfil estavel recomendado
+
+Com base nos benchmarks recentes deste equipamento:
+
+- configuracao recomendada: `QUEUE_WORKER_THREADS=10`
+- capacidade segura observada: `20 jobs/s`
+- alvo operacional recomendado: `16 jobs/s` (margem de seguranca)
+
+Para subir a API no perfil estavel:
+
+```bash
+./scripts/start-stable-profile.sh
+```
+
+O script aplica migracoes e inicia a API com os parametros recomendados.
+
 ## Cenarios predefinidos
 
 - `happy-path`

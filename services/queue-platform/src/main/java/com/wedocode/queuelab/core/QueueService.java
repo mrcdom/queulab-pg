@@ -20,7 +20,7 @@ public final class QueueService {
 
   public QueueRepository.EnqueueResult enqueue(EnqueueCommand command) {
     validate(command);
-    return repository.enqueue(command);
+    return repository.enqueue(command, UUID.randomUUID().toString());
   }
 
   public DashboardSnapshot dashboard() {
@@ -41,11 +41,11 @@ public final class QueueService {
   }
 
   public boolean requeueFailedJob(long jobId) {
-    return repository.requeueJob(jobId);
+    return repository.requeueJob(jobId, UUID.randomUUID().toString());
   }
 
   public int reconcileNow() {
-    return repository.reconcileStuckJobs(Duration.ofSeconds(config.processingTimeoutSeconds()));
+    return repository.reconcileStuckJobs(Duration.ofSeconds(config.processingTimeoutSeconds()), UUID.randomUUID().toString());
   }
 
   public BurstResult enqueueBurst(BurstCommand command) {

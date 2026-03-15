@@ -5,6 +5,7 @@ import java.time.Instant;
 
 public record QueueJob(
     long id,
+    long jobVersion,
     String queueName,
     String dedupKey,
     JsonNode payload,

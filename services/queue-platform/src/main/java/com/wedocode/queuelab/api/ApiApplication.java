@@ -22,6 +22,9 @@ public final class ApiApplication {
     var dataSource = DataSourceFactory.create(config);
     var repository = new QueueRepository(dataSource);
     var service = new QueueService(repository, config);
+    var eventHub = new QueueEventHub();
+    var outboxRelay = new OutboxRelay(repository, eventHub);
+    outboxRelay.start();
 
     WorkerRuntime embeddedRuntime = null;
     if (config.startEmbeddedWorkers()) {
@@ -42,6 +45,7 @@ public final class ApiApplication {
     app.get("/api/health", ctx -> ctx.json(Map.of("status", "ok", "timestamp", Instant.now())));
 
     app.get("/api/dashboard", ctx -> ctx.json(service.dashboard()));
+    app.get("/api/dashboard/snapshot", ctx -> ctx.json(service.dashboard()));
     app.get("/api/jobs", ctx -> ctx.json(service.jobs(
         optional(ctx.queryParam("queueName")),
         optional(ctx.queryParam("status")),
@@ -52,6 +56,17 @@ public final class ApiApplication {
         .ifPresentOrElse(ctx::json, () -> ctx.status(HttpStatus.NOT_FOUND).json(Map.of("message", "Job nao encontrado"))));
     app.get("/api/dlq", ctx -> ctx.json(service.jobs(optional(ctx.queryParam("queueName")), optional("FAILED"), optional(ctx.queryParam("search")), 100)));
     app.get("/api/workers", ctx -> ctx.json(service.workers()));
+    app.get("/api/events/since", ctx -> {
+      var cursor = ctx.queryParamAsClass("cursor", Long.class).getOrDefault(0L);
+      var limit = Math.min(Math.max(ctx.queryParamAsClass("limit", Integer.class).getOrDefault(100), 1), 500);
+      ctx.json(repository.listEventsSince(cursor, limit));
+    });
+
+    app.ws("/api/events/ws", ws -> {
+      ws.onConnect(eventHub::register);
+      ws.onClose(eventHub::unregister);
+      ws.onError(eventHub::unregister);
+    });
 
     app.post("/api/jobs", ctx -> {
       var request = ctx.bodyAsClass(EnqueueRequest.class);
@@ -106,6 +121,7 @@ public final class ApiApplication {
     });
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      outboxRelay.stop();
       if (runtimeReference != null) {
         runtimeReference.stop();
       }

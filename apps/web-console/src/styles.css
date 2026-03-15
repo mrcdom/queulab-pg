@@ -113,6 +113,34 @@ button {
   flex-wrap: wrap;
 }
 
+.connection-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.84rem;
+  border: 1px solid transparent;
+}
+
+.connection-pill--connected {
+  background: rgba(16, 185, 129, 0.18);
+  border-color: rgba(5, 150, 105, 0.35);
+  color: #065f46;
+}
+
+.connection-pill--reconnecting {
+  background: rgba(251, 191, 36, 0.2);
+  border-color: rgba(217, 119, 6, 0.35);
+  color: #92400e;
+}
+
+.connection-pill--disconnected {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(185, 28, 28, 0.3);
+  color: #991b1b;
+}
+
 .view-tabs {
   display: flex;
   gap: 10px;

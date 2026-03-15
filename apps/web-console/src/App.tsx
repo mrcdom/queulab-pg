@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useState } from 'react';
-import { api, DashboardSnapshot, QueueJob, QueueStatus, WorkerSnapshot } from './lib/api';
+import { FormEvent, useEffect, useRef, useState } from 'react';
+import { api, DashboardSnapshot, QueueEventEnvelope, QueueJob, QueueStatus, WorkerSnapshot } from './lib/api';
 import { MetricCard } from './components/MetricCard';
 import { SectionCard } from './components/SectionCard';
 import { DataTable } from './components/DataTable';
+import { ConnectionState, QueueEventClient } from './lib/events';
 
 type View = 'dashboard' | 'jobs' | 'dlq' | 'workers' | 'simulator';
 
@@ -59,6 +60,11 @@ export default function App() {
   const [burstPermanentFailures, setBurstPermanentFailures] = useState(0);
   const [burstUseDedup, setBurstUseDedup] = useState(false);
   const [burstRepeatDedup, setBurstRepeatDedup] = useState(false);
+  const [eventConnectionState, setEventConnectionState] = useState<ConnectionState>('disconnected');
+  const eventClientRef = useRef<QueueEventClient | null>(null);
+  const jobsRef = useRef<QueueJob[]>([]);
+  const dlqRef = useRef<QueueJob[]>([]);
+  const selectedJobRef = useRef<QueueJob | null>(null);
 
   async function loadAll() {
     try {
@@ -74,7 +80,7 @@ export default function App() {
       }
 
       const [nextDashboard, nextJobs, nextDlq, nextWorkers] = await Promise.all([
-        api.dashboard(),
+        api.dashboardSnapshot(),
         api.jobs(params),
         api.dlq(),
         api.workers(),
@@ -95,10 +101,97 @@ export default function App() {
   }
 
   useEffect(() => {
-    loadAll();
-    const timer = window.setInterval(loadAll, 4000);
-    return () => window.clearInterval(timer);
+    void loadAll();
   }, [queueFilter, statusFilter, search]);
+
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
+
+  useEffect(() => {
+    dlqRef.current = dlq;
+  }, [dlq]);
+
+  useEffect(() => {
+    selectedJobRef.current = selectedJob;
+  }, [selectedJob]);
+
+  useEffect(() => {
+    const client = new QueueEventClient({
+      onEvent: (event) => {
+        void handleRealtimeEvent(event);
+      },
+      onStateChange: setEventConnectionState,
+    });
+    eventClientRef.current = client;
+    client.start();
+    return () => client.stop();
+  }, []);
+
+  async function handleRealtimeEvent(event: QueueEventEnvelope) {
+    const currentJobs = [...jobsRef.current, ...dlqRef.current];
+    const knownVersion = currentJobs.find((item) => item.id === event.jobId)?.jobVersion ?? 0;
+
+    if (event.jobVersion > knownVersion + 1) {
+      await reconcileJob(event.jobId);
+      return;
+    }
+
+    await refreshJob(event.jobId);
+  }
+
+  async function reconcileJob(jobId: number) {
+    await refreshJob(jobId);
+    setMessage((previous) => previous ?? `Reconciliação aplicada para o job ${jobId}.`);
+  }
+
+  async function refreshJob(jobId: number) {
+    try {
+      const [snapshot, workerList] = await Promise.all([
+        api.dashboardSnapshot(),
+        api.workers(),
+      ]);
+      const latestJob = await api.job(jobId);
+
+      setDashboard(snapshot);
+      setWorkers(workerList);
+      upsertJob(latestJob);
+      eventClientRef.current?.setCurrentVersion(latestJob.id, latestJob.jobVersion);
+      if (selectedJobRef.current?.id === latestJob.id) {
+        setSelectedJob(latestJob);
+      }
+    } catch {
+      // Polling fallback will restore eventual consistency.
+    }
+  }
+
+  function upsertJob(job: QueueJob) {
+    setJobs((current) => {
+      if (job.status === 'FAILED') {
+        return current.filter((item) => item.id !== job.id);
+      }
+      const existingIndex = current.findIndex((item) => item.id === job.id);
+      if (existingIndex < 0) {
+        return [job, ...current];
+      }
+      const next = [...current];
+      next[existingIndex] = job;
+      return next;
+    });
+
+    setDlq((current) => {
+      if (job.status !== 'FAILED') {
+        return current.filter((item) => item.id !== job.id);
+      }
+      const existingIndex = current.findIndex((item) => item.id === job.id);
+      if (existingIndex < 0) {
+        return [job, ...current];
+      }
+      const next = [...current];
+      next[existingIndex] = job;
+      return next;
+    });
+  }
 
   async function handleManualSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -184,6 +277,7 @@ export default function App() {
           </p>
         </div>
         <div className="hero-actions">
+          <span className={`connection-pill connection-pill--${eventConnectionState}`}>Eventos: {eventConnectionState}</span>
           <button type="button" className="ghost-button" onClick={loadAll}>Atualizar agora</button>
           <button type="button" className="primary-button" onClick={handleReconcile}>Reconciliar stuck jobs</button>
         </div>
@@ -245,7 +339,7 @@ export default function App() {
           ) : null}
 
           {view === 'jobs' ? (
-            <SectionCard title="Fila em tempo real" subtitle="Polling curto para acompanhar o estado operacional." action={(
+            <SectionCard title="Fila em tempo real" subtitle="Atualização orientada por eventos WebSocket." action={(
               <div className="filters">
                 <select value={queueFilter} onChange={(event) => setQueueFilter(event.target.value)}>
                   <option value="">Todas as filas</option>

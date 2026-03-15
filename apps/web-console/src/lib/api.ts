@@ -19,6 +19,7 @@ export interface DashboardSnapshot {
 
 export interface QueueJob {
   id: number;
+  jobVersion: number;
   queueName: string;
   dedupKey: string | null;
   payload: Record<string, unknown>;
@@ -48,6 +49,28 @@ export interface BurstResult {
   requested: number;
 }
 
+export interface QueueEventEnvelope {
+  eventId: string;
+  eventType: string;
+  eventVersion: number;
+  occurredAt: string;
+  source: string;
+  correlationId: string;
+  queueName: string;
+  jobId: number;
+  jobVersion: number;
+  payload: Record<string, unknown>;
+}
+
+export interface OutboxEvent {
+  outboxId: number;
+  eventId: string;
+  aggregateId: number;
+  aggregateVersion: number;
+  occurredAt: string;
+  payload: string;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:7070';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -70,9 +93,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<{ status: string; timestamp: string }>('/api/health'),
   dashboard: () => request<DashboardSnapshot>('/api/dashboard'),
+  dashboardSnapshot: () => request<DashboardSnapshot>('/api/dashboard/snapshot'),
   jobs: (params?: URLSearchParams) => request<QueueJob[]>(`/api/jobs${params ? `?${params}` : ''}`),
+  job: (jobId: number) => request<QueueJob>(`/api/jobs/${jobId}`),
   dlq: () => request<QueueJob[]>('/api/dlq'),
   workers: () => request<WorkerSnapshot[]>('/api/workers'),
+  eventsSince: (cursor: number, limit = 100) => request<OutboxEvent[]>(`/api/events/since?cursor=${cursor}&limit=${limit}`),
   enqueue: (payload: Record<string, unknown>) => request<{ jobId: number; created: boolean }>('/api/jobs', {
     method: 'POST',
     body: JSON.stringify(payload),
