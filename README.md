@@ -23,6 +23,12 @@ tasks/                     Plano de execucao e revisao
 - Dashboard React para backlog, jobs, DLQ e workers
 - Simulador React para envio manual, burst e cenarios predefinidos
 
+## Guia de escala
+
+Para orientacoes detalhadas de escalabilidade (workers horizontais, PgBouncer com listener dedicado, particionamento e limites praticos), consulte:
+
+- [docs/estrategia-de-escala.md](docs/estrategia-de-escala.md)
+
 ## Compatibilidade com PostgreSQL
 
 ### Matriz de compatibilidade
