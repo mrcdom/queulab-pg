@@ -18,8 +18,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public final class RabbitWorkerRuntime {
-  private static final Logger LOGGER = LoggerFactory.getLogger(RabbitWorkerRuntime.class);
+public final class RabbitMqWorkerRuntime {
+  private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqWorkerRuntime.class);
   private final QueueRepository repository;
   private final AppConfig config;
   private final JobProcessor processor;
@@ -28,7 +28,7 @@ public final class RabbitWorkerRuntime {
   private final CountDownLatch shutdownLatch = new CountDownLatch(1);
   private final String runtimeId = UUID.randomUUID().toString().substring(0, 8);
 
-  public RabbitWorkerRuntime(QueueRepository repository, AppConfig config, JobProcessor processor) {
+  public RabbitMqWorkerRuntime(QueueRepository repository, AppConfig config, JobProcessor processor) {
     this.repository = Objects.requireNonNull(repository, "repository nao pode ser nulo");
     this.config = Objects.requireNonNull(config, "config nao pode ser nulo");
     this.processor = Objects.requireNonNull(processor, "processor nao pode ser nulo");
@@ -40,7 +40,7 @@ public final class RabbitWorkerRuntime {
     }
 
     LOGGER.info(
-        "Iniciando RabbitWorkerRuntime com {} workers (exchange='{}', queue='{}', routingKey='{}', host='{}', port={})",
+      "Iniciando RabbitMqWorkerRuntime com {} workers (exchange='{}', queue='{}', routingKey='{}', host='{}', port={})",
         config.workerThreads(),
         config.rabbitExchange(),
         config.rabbitQueue(),

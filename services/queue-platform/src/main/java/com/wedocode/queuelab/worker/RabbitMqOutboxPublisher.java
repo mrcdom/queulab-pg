@@ -14,8 +14,8 @@ import org.postgresql.PGConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public final class RabbitOutboxPublisher {
-  private static final Logger LOGGER = LoggerFactory.getLogger(RabbitOutboxPublisher.class);
+public final class RabbitMqOutboxPublisher {
+  private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqOutboxPublisher.class);
   private final DataSource dataSource;
   private final QueueRepository repository;
   private final AppConfig config;
@@ -25,7 +25,7 @@ public final class RabbitOutboxPublisher {
   private Thread publisherThread;
   private Connection rabbitConnection;
 
-  public RabbitOutboxPublisher(DataSource dataSource, QueueRepository repository, AppConfig config) {
+  public RabbitMqOutboxPublisher(DataSource dataSource, QueueRepository repository, AppConfig config) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource nao pode ser nulo");
     this.repository = Objects.requireNonNull(repository, "repository nao pode ser nulo");
     this.config = Objects.requireNonNull(config, "config nao pode ser nulo");
@@ -37,7 +37,7 @@ public final class RabbitOutboxPublisher {
     }
 
     LOGGER.info(
-        "Iniciando RabbitOutboxPublisher (host='{}', port={}, exchange='{}', queue='{}', routingKey='{}', batchSize={})",
+      "Iniciando RabbitMqOutboxPublisher (host='{}', port={}, exchange='{}', queue='{}', routingKey='{}', batchSize={})",
         config.rabbitHost(),
         config.rabbitPort(),
         config.rabbitExchange(),

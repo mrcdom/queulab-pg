@@ -6,9 +6,9 @@ import com.wedocode.queuelab.core.DataSourceFactory;
 import com.wedocode.queuelab.core.QueueService;
 import com.wedocode.queuelab.core.QueueRepository;
 import com.wedocode.queuelab.worker.NotificationJobProcessor;
-import com.wedocode.queuelab.worker.RabbitOutboxPublisher;
-import com.wedocode.queuelab.worker.RabbitWorkerRuntime;
-import com.wedocode.queuelab.worker.WorkerRuntime;
+import com.wedocode.queuelab.worker.RabbitMqOutboxPublisher;
+import com.wedocode.queuelab.worker.RabbitMqWorkerRuntime;
+import com.wedocode.queuelab.worker.PostgresWorkerRuntime;
 import io.javalin.Javalin;
 import io.javalin.http.HttpStatus;
 import io.javalin.json.JavalinJackson;
@@ -29,20 +29,20 @@ public final class ApiApplication {
     var outboxRelay = new OutboxRelay(repository, eventHub, eventMetrics);
     outboxRelay.start();
 
-    RabbitOutboxPublisher brokerPublisher = null;
+    RabbitMqOutboxPublisher brokerPublisher = null;
     if (config.useRabbitTransport()) {
-      brokerPublisher = new RabbitOutboxPublisher(dataSource, repository, config);
+      brokerPublisher = new RabbitMqOutboxPublisher(dataSource, repository, config);
       brokerPublisher.start();
     }
 
-    WorkerRuntime embeddedRuntime = null;
-    RabbitWorkerRuntime embeddedRabbitRuntime = null;
+    PostgresWorkerRuntime embeddedRuntime = null;
+    RabbitMqWorkerRuntime embeddedRabbitRuntime = null;
     if (config.startEmbeddedWorkers()) {
       if (config.useRabbitTransport()) {
-        embeddedRabbitRuntime = new RabbitWorkerRuntime(repository, config, new NotificationJobProcessor(config));
+        embeddedRabbitRuntime = new RabbitMqWorkerRuntime(repository, config, new NotificationJobProcessor(config));
         embeddedRabbitRuntime.start();
       } else {
-        embeddedRuntime = new WorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
+        embeddedRuntime = new PostgresWorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
         embeddedRuntime.start();
       }
     }

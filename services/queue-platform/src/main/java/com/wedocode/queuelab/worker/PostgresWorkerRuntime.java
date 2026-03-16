@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 import org.postgresql.PGConnection;
 
-public final class WorkerRuntime {
+public final class PostgresWorkerRuntime {
   private final DataSource dataSource;
   private final QueueRepository repository;
   private final AppConfig config;
@@ -27,7 +27,7 @@ public final class WorkerRuntime {
   private Thread listenerThread;
   private final String runtimeId = UUID.randomUUID().toString().substring(0, 8);
 
-  public WorkerRuntime(DataSource dataSource, QueueRepository repository, AppConfig config, JobProcessor processor) {
+  public PostgresWorkerRuntime(DataSource dataSource, QueueRepository repository, AppConfig config, JobProcessor processor) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource nao pode ser nulo");
     this.repository = Objects.requireNonNull(repository, "repository nao pode ser nulo");
     this.config = Objects.requireNonNull(config, "config nao pode ser nulo");

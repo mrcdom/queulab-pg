@@ -14,8 +14,8 @@ public final class WorkerApplication {
     var repository = new QueueRepository(dataSource);
 
     if (config.useRabbitTransport()) {
-      var publisher = new RabbitOutboxPublisher(dataSource, repository, config);
-      var runtime = new RabbitWorkerRuntime(repository, config, new NotificationJobProcessor(config));
+      var publisher = new RabbitMqOutboxPublisher(dataSource, repository, config);
+      var runtime = new RabbitMqWorkerRuntime(repository, config, new NotificationJobProcessor(config));
       Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("worker-shutdown-hook-rabbit").unstarted(() -> {
         runtime.stop();
         publisher.stop();
@@ -26,7 +26,7 @@ public final class WorkerApplication {
       return;
     }
 
-    var runtime = new WorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
+    var runtime = new PostgresWorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
     Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("worker-shutdown-hook").unstarted(runtime::stop));
     runtime.start();
     runtime.await();
