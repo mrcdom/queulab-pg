@@ -1,13 +1,13 @@
-# QueueLab PG
+# QueueLab (RabbitMQ + PostgreSQL)
 
-Projeto demonstrativo para validar PostgreSQL 17 como fila confiavel em cenarios assincronos de volume moderado, com foco em observabilidade operacional e narrativa de demonstracao.
+Projeto demonstrativo para validar uma arquitetura de filas hibrida, com RabbitMQ como transporte principal e PostgreSQL 17 como armazenamento transacional e controle operacional (estado dos jobs, retries, DLQ e outboxes).
 
 ## Estrutura
 
 ```text
 apps/web-console           Frontend React para monitoramento e simulacao
 services/queue-platform    API Javalin + worker Java
-database/migrations        Schema SQL do PostgreSQL
+database/migrations        Schema SQL do PostgreSQL (jobs, event_outbox, message_outbox)
 infra/docker-compose.yml   Ambiente local com Postgres 17
 docs/                      Proposta, arquitetura e planejamento
 tasks/                     Plano de execucao e revisao
@@ -16,14 +16,22 @@ tasks/                     Plano de execucao e revisao
 ## O que o MVP entrega
 
 - Enfileiramento transacional em `job_queue`
-- Wake-up de workers via `LISTEN/NOTIFY`
-- Claim concorrente com `FOR UPDATE SKIP LOCKED`
-- Retry com backoff exponencial e DLQ logica (`FAILED`)
+- Publicacao assincrona via `message_outbox` para RabbitMQ
+- Modo de transporte configuravel (`QUEUE_TRANSPORT=postgres|rabbitmq`)
+- Worker com `ack/nack`, retry com backoff exponencial e DLQ logica (`FAILED`)
 - Reconciliacao manual de jobs presos em `PROCESSING`
+- Eventing para observabilidade via `event_outbox`
 - Dashboard React para backlog, jobs, DLQ e workers
 - Simulador React para envio manual, burst e cenarios predefinidos
 
-## Compatibilidade com PostgreSQL
+## Arquitetura atual (hibrida)
+
+- `rabbitmq` (padrao): API grava no PostgreSQL e publica no RabbitMQ via outbox; workers consomem da fila e consolidam estado no PostgreSQL.
+- `postgres`: modo alternativo para execucao sem broker, com workers fazendo claim direto em `job_queue`.
+
+Em ambos os modos, PostgreSQL continua sendo a fonte de verdade para estados e metricas operacionais.
+
+## Compatibilidade com PostgreSQL (storage)
 
 ### Matriz de compatibilidade
 
@@ -40,6 +48,8 @@ O minimo tecnico da solucao e PostgreSQL 9.5, por causa de recursos usados diret
 - `FOR UPDATE SKIP LOCKED`
 - `INSERT ... ON CONFLICT`
 
+Para executar em modo `rabbitmq`, tambem e necessario um broker RabbitMQ acessivel pelas variaveis `QUEUE_RABBIT_*`.
+
 ### Recomendacao de uso
 
 - Recomendado: PostgreSQL 14+
@@ -52,6 +62,10 @@ Essa recomendacao equilibra compatibilidade, estabilidade operacional e ciclo de
 ### Opcao rapida (script unico)
 
 ```bash
+# sem RabbitMQ local: force modo postgres
+QUEUE_TRANSPORT=postgres ./scripts/run-local-demo.sh
+
+# com RabbitMQ local: usa o modo padrao (rabbitmq)
 ./scripts/run-local-demo.sh
 ```
 
@@ -72,6 +86,15 @@ Variaveis suportadas (opcionais):
 - `DB_ADMIN_NAME` (padrao `postgres`)
 - `DB_NAME` (padrao `queue_lab`)
 - `API_PORT` (padrao `7070`)
+- `QUEUE_TRANSPORT` (`postgres` ou `rabbitmq`; padrao `rabbitmq`)
+- `QUEUE_RABBIT_HOST` (padrao `127.0.0.1`)
+- `QUEUE_RABBIT_PORT` (padrao `5672`)
+- `QUEUE_RABBIT_USER` (padrao `guest`)
+- `QUEUE_RABBIT_PASSWORD` (padrao `guest`)
+- `QUEUE_RABBIT_VHOST` (padrao `/`)
+- `QUEUE_RABBIT_EXCHANGE` (padrao `jobs.direct`)
+- `QUEUE_RABBIT_QUEUE` (padrao `notification.send.q`)
+- `QUEUE_RABBIT_ROUTING_KEY` (padrao `notification.send`)
 
 ### Execucao manual (passo a passo)
 
@@ -120,11 +143,14 @@ QUEUE_DB_USER='postgres' \
 QUEUE_DB_PASSWORD='admin' \
 QUEUE_API_PORT='7070' \
 QUEUE_START_EMBEDDED_WORKERS='true' \
+QUEUE_TRANSPORT='postgres' \
 mvn -q -f services/queue-platform/pom.xml exec:java \
 	-Dexec.mainClass=com.wedocode.queuelab.api.ApiApplication
 ```
 
- Se estiver usando Docker Compose sem customizacao, mantenha `QUEUE_DB_PASSWORD='admin'`.
+Para executar em `rabbitmq`, substitua `QUEUE_TRANSPORT='postgres'` por `QUEUE_TRANSPORT='rabbitmq'` e configure `QUEUE_RABBIT_*`.
+
+Se estiver usando Docker Compose sem customizacao, mantenha `QUEUE_DB_PASSWORD='admin'`.
 
 #### 3. Subir frontend
 
@@ -150,59 +176,9 @@ curl -sS http://localhost:7070/api/workers
 
 Se esses comandos retornarem JSON sem erro, a solucao manual esta operacional.
 
-### 1. Banco
-
-```bash
-cd infra
-docker compose up -d
-```
-
-O Postgres sera iniciado com:
-
-- database: `queue_lab`
-- user: `postgres`
-- password: `admin`
-
-### 2. API Javalin
-
-```bash
-cd services/queue-platform
-mvn exec:java -Dexec.mainClass=com.wedocode.queuelab.api.ApiApplication
-```
-
-Variaveis uteis:
-
-- `QUEUE_API_PORT=7070`
-- `QUEUE_DB_URL=jdbc:postgresql://localhost:5432/queue_lab`
-- `QUEUE_DB_USER=postgres`
-- `QUEUE_DB_PASSWORD=admin`
-- `QUEUE_START_EMBEDDED_WORKERS=true`
-- `QUEUE_WORKER_THREADS=3`
-
-Se preferir rodar os workers separados:
-
-```bash
-cd services/queue-platform
-mvn exec:java -Dexec.mainClass=com.wedocode.queuelab.worker.WorkerApplication
-```
-
-### 3. Frontend React
-
-```bash
-cd apps/web-console
-npm install
-npm run dev
-```
-
-Por padrao, o frontend aponta para `http://localhost:7070`. Para sobrescrever:
-
-```bash
-VITE_API_BASE_URL=http://localhost:7070 npm run dev
-```
-
 ## Fluxo sugerido de demonstracao
 
-1. Inicie o Postgres e a API com workers embutidos.
+1. Inicie o Postgres e a API com workers embutidos (em `postgres` ou `rabbitmq`).
 2. Abra o console React e acompanhe o dashboard.
 3. Execute um burst ou um cenario predefinido no simulador.
 4. Observe jobs passando por `PENDING`, `PROCESSING`, `RETRY`, `DONE` e `FAILED`.
@@ -279,7 +255,7 @@ Foram executadas matrizes comparativas com os mesmos parametros em `QUEUE_TRANSP
 
 Resumo consolidado:
 
-| Matriz | PostgreSQL-only (safe capacity) | RabbitMQ (safe capacity) | Leitura prática |
+| Matriz | PostgreSQL-only (safe capacity) | RabbitMQ (safe capacity) | Leitura pratica |
 | --- | --- | --- | --- |
 | `workers=2 4 8`, `rates=5 10 15` | `workers=8, rate=15, throughput=15.85 jobs/s` | `workers=8, rate=15, throughput=15.65 jobs/s` | Diferenca pequena; empate tecnico. |
 | `workers=8 12 16`, `rates=20 30 40` | `workers=16, rate=30, throughput=30.97 jobs/s` | `workers=16, rate=30, throughput=30.97 jobs/s` | Empate tecnico. |
@@ -291,7 +267,7 @@ Conclusao dos testes atuais:
 - O beneficio do RabbitMQ aparece mais em aspectos operacionais (desacoplamento, roteamento, elasticidade e governanca), nao em capacidade maxima observada neste experimento.
 
 
-## Perfil estável recomendado
+## Perfil estavel recomendado
 
 Com base nos benchmarks recentes deste equipamento:
 
@@ -307,7 +283,7 @@ WORKER_THREADS_LIST='16 24 32' TARGET_RATES='50 70 90' WARMUP_SECONDS='10' MEASU
 WORKER_THREADS_LIST='16 24 32' TARGET_RATES='50 70 90' WARMUP_SECONDS='10' MEASURE_SECONDS='35' SAMPLE_INTERVAL_SECONDS='5' DB_RESET_MODE='required' PSQL_PATH='/Users/mrcdom/Works/services/pgsql17/bin/psql' API_PORT='7101' QUEUE_TRANSPORT='rabbitmq' BENCHMARK_QUEUE_NAME='notification.send' QUEUE_RABBIT_QUEUE='notification.send.q' QUEUE_RABBIT_ROUTING_KEY='notification.send' QUEUE_RABBIT_EXCHANGE='jobs.direct' ./scripts/run-capacity-benchmark-ai.sh
 ```
 
-O script aplica migrações e inicia a API com os parâmetros recomendados.
+O script aplica migracoes e inicia a API com os parametros recomendados.
 
 ## Cenarios predefinidos
 
