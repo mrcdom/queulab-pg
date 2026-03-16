@@ -14,7 +14,7 @@ import javax.sql.DataSource;
 import org.postgresql.PGConnection;
 
 public final class WorkerRuntime {
-  private final DataSource dataSource;
+  private final DataSource listenerDataSource;
   private final WorkerRuntimeRepository repository;
   private final AppConfig config;
   private final JobProcessor processor;
@@ -25,8 +25,8 @@ public final class WorkerRuntime {
   private Thread listenerThread;
   private final String runtimeId = UUID.randomUUID().toString().substring(0, 8);
 
-  public WorkerRuntime(DataSource dataSource, WorkerRuntimeRepository repository, AppConfig config, JobProcessor processor) {
-    this.dataSource = dataSource;
+  public WorkerRuntime(DataSource listenerDataSource, WorkerRuntimeRepository repository, AppConfig config, JobProcessor processor) {
+    this.listenerDataSource = listenerDataSource;
     this.repository = repository;
     this.config = config;
     this.processor = processor;
@@ -140,7 +140,7 @@ public final class WorkerRuntime {
 
   private void listenForNotifications() {
     while (running.get()) {
-      try (var connection = dataSource.getConnection();
+      try (var connection = listenerDataSource.getConnection();
            var statement = connection.createStatement()) {
         statement.execute("LISTEN job_queue_new");
         var pgConnection = connection.unwrap(PGConnection.class);

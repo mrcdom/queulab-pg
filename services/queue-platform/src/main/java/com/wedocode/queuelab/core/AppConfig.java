@@ -16,6 +16,18 @@ public record AppConfig(
     boolean startEmbeddedWorkers
 ) {
 
+  public String listenerJdbcUrl() {
+    return env("QUEUE_DB_LISTENER_URL", jdbcUrl);
+  }
+
+  public String listenerDbUser() {
+    return env("QUEUE_DB_LISTENER_USER", dbUser);
+  }
+
+  public String listenerDbPassword() {
+    return env("QUEUE_DB_LISTENER_PASSWORD", dbPassword);
+  }
+
   public static AppConfig fromEnv() {
     return new AppConfig(
         env("QUEUE_DB_URL", "jdbc:postgresql://localhost:5432/queue_lab"),

@@ -13,6 +13,7 @@ import io.javalin.http.HttpStatus;
 import io.javalin.json.JavalinJackson;
 import java.time.Instant;
 import java.util.Map;
+import javax.sql.DataSource;
 
 public final class ApiApplication {
   private ApiApplication() {
@@ -29,12 +30,15 @@ public final class ApiApplication {
     outboxRelay.start();
 
     WorkerRuntime embeddedRuntime = null;
+    DataSource listenerDataSource = null;
     if (config.startEmbeddedWorkers()) {
-      embeddedRuntime = new WorkerRuntime(dataSource, new QueueRepositoryWorkerAdapter(repository), config, new NotificationJobProcessor(config));
+      listenerDataSource = DataSourceFactory.createListener(config);
+      embeddedRuntime = new WorkerRuntime(listenerDataSource, new QueueRepositoryWorkerAdapter(repository), config, new NotificationJobProcessor(config));
       embeddedRuntime.start();
     }
 
     var runtimeReference = embeddedRuntime;
+    var listenerDataSourceReference = listenerDataSource;
     var app = Javalin.create(configuration -> {
       configuration.jsonMapper(new JavalinJackson());
       configuration.showJavalinBanner = false;
@@ -128,6 +132,8 @@ public final class ApiApplication {
       if (runtimeReference != null) {
         runtimeReference.stop();
       }
+      closeQuietly(listenerDataSourceReference);
+      closeQuietly(dataSource);
     }));
 
     app.start(config.apiPort());
@@ -135,6 +141,15 @@ public final class ApiApplication {
 
   private static java.util.Optional<String> optional(String value) {
     return value == null || value.isBlank() ? java.util.Optional.empty() : java.util.Optional.of(value);
+  }
+
+  private static void closeQuietly(DataSource dataSource) {
+    if (dataSource instanceof AutoCloseable closeable) {
+      try {
+        closeable.close();
+      } catch (Exception ignored) {
+      }
+    }
   }
 
   public record EnqueueRequest(

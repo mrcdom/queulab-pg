@@ -66,7 +66,56 @@ Worker instances (N×M conexões lógicas)
   PostgreSQL (K conexões físicas — ex: 50–100)
 ```
 
-**Ressalva crítica:** `LISTEN/NOTIFY` não funciona com `transaction pooling` no PgBouncer — a conexão do listener precisa ser dedicada (via session pooling separado ou conexão direta ao Postgres fora do pool). A implementação atual usa o mesmo pool para LISTEN e processamento — isso precisaria ser separado caso PgBouncer seja introduzido.
+**Ressalva crítica:** `LISTEN/NOTIFY` não funciona com `transaction pooling` no PgBouncer — a conexão do listener precisa ser dedicada (via session pooling separado ou conexão direta ao Postgres fora do pool).
+
+### Status no código (aplicado)
+
+A solução agora já separa as conexões:
+
+- **Pool principal** para operações de tabela (`claim`, `update`, `outbox`, dashboard, etc.) via `QUEUE_DB_URL`.
+- **Pool dedicado do listener** para `LISTEN job_queue_new` via `QUEUE_DB_LISTENER_URL`.
+
+Variáveis disponíveis:
+
+- `QUEUE_DB_LISTENER_URL` (opcional, default = `QUEUE_DB_URL`)
+- `QUEUE_DB_LISTENER_USER` (opcional, default = `QUEUE_DB_USER`)
+- `QUEUE_DB_LISTENER_PASSWORD` (opcional, default = `QUEUE_DB_PASSWORD`)
+
+Exemplo recomendado com PgBouncer:
+
+```bash
+# Pool de transações para tráfego normal de banco
+QUEUE_DB_URL='jdbc:postgresql://pgbouncer-tx:6432/queue_lab'
+
+# Conexão dedicada para LISTEN/NOTIFY fora de transaction pooling
+# Pode ser Postgres direto ou PgBouncer em session pooling
+QUEUE_DB_LISTENER_URL='jdbc:postgresql://postgres-primary:5432/queue_lab'
+
+QUEUE_DB_USER='queue_app'
+QUEUE_DB_PASSWORD='***'
+QUEUE_DB_LISTENER_USER='queue_listener'
+QUEUE_DB_LISTENER_PASSWORD='***'
+```
+
+Se `QUEUE_DB_LISTENER_URL` não for definido, o sistema mantém compatibilidade e usa o mesmo endpoint do tráfego principal.
+
+### Smoke test automatizado (PgBouncer + listener dedicado)
+
+Para validar rapidamente o cenário recomendado, execute:
+
+```bash
+./scripts/run-pgbouncer-split-smoke.sh
+```
+
+O script faz:
+
+1. Sobe PgBouncer local (`/Users/mrcdom/Works/services/pgbouncer/run.sh`).
+2. Valida conexão no pool transacional.
+3. Aplica migrações.
+4. Sobe API com `QUEUE_DB_URL` via PgBouncer e `QUEUE_DB_LISTENER_URL` direto no Postgres.
+5. Enfileira um job de teste e verifica status `DONE`.
+6. Confirma eventos `SENT` na outbox do job.
+7. Encerra API e PgBouncer automaticamente.
 
 ---
 
@@ -150,6 +199,7 @@ A escolha entre os dois não é de performance bruta — é de modelo semântico
 2. **Múltiplas instâncias de Worker** apontando para o mesmo banco.
 3. **Sharding por `queue_name`** quando uma fila específica virar gargalo — sem mudança de schema.
 4. **PgBouncer** quando o número de conexões físicas ultrapassar ~100.
+  Configurar `QUEUE_DB_LISTENER_URL` para endpoint fora de `transaction pooling`.
 5. **Particionamento nativo** quando o sharding por nome não for suficiente para reduzir contention.
 6. **Read replica** quando o dashboard/observabilidade estiver competindo com o processamento.
 7. **RabbitMQ como transporte** quando o PostgreSQL atingir o teto de ~5.000 jobs/s — PostgreSQL assume o papel de store de estado e histórico; RabbitMQ cuida do enfileiramento e entrega. Só avançar para Kafka/Pulsar se o requisito for streaming massivo com replay ou fan-out para múltiplos consumidores independentes.

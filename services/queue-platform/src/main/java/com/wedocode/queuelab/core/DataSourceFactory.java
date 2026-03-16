@@ -19,4 +19,16 @@ public final class DataSourceFactory {
     hikariConfig.setPoolName("queue-lab-pool");
     return new HikariDataSource(hikariConfig);
   }
+
+  public static DataSource createListener(AppConfig config) {
+    var hikariConfig = new HikariConfig();
+    hikariConfig.setJdbcUrl(config.listenerJdbcUrl());
+    hikariConfig.setUsername(config.listenerDbUser());
+    hikariConfig.setPassword(config.listenerDbPassword());
+    hikariConfig.setMaximumPoolSize(1);
+    hikariConfig.setMinimumIdle(0);
+    hikariConfig.setAutoCommit(true);
+    hikariConfig.setPoolName("queue-lab-listener-pool");
+    return new HikariDataSource(hikariConfig);
+  }
 }
