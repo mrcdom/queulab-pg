@@ -256,7 +256,7 @@ Este plano prioriza execução por IA com passos determinísticos, artefatos ver
 
 - [x] Entradas: tarefas VT10-VT21 concluídas.
 - [x] Ação: validar build/test e registrar impacto técnico da migração.
-- [x] Arquivo-alvo: docs/planejamento.md (se necessário), tasks/todo.md (revisão final).
+- [x] Arquivo-alvo: docs/guia-operacional-da-ia.md (se necessário), tasks/todo.md (revisão final).
 - [x] Comando-gate: `mvn -q -f services/queue-platform/pom.xml test`.
 - [x] Saída esperada: suíte verde e critérios de sucesso documentados.
 
