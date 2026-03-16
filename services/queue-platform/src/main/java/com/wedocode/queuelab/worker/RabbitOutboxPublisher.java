@@ -6,6 +6,8 @@ import com.rabbitmq.client.ConnectionFactory;
 import com.wedocode.queuelab.core.AppConfig;
 import com.wedocode.queuelab.core.QueueRepository;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 import org.postgresql.PGConnection;
@@ -24,9 +26,9 @@ public final class RabbitOutboxPublisher {
   private Connection rabbitConnection;
 
   public RabbitOutboxPublisher(DataSource dataSource, QueueRepository repository, AppConfig config) {
-    this.dataSource = dataSource;
-    this.repository = repository;
-    this.config = config;
+    this.dataSource = Objects.requireNonNull(dataSource, "dataSource nao pode ser nulo");
+    this.repository = Objects.requireNonNull(repository, "repository nao pode ser nulo");
+    this.config = Objects.requireNonNull(config, "config nao pode ser nulo");
   }
 
   public void start() {
@@ -43,10 +45,8 @@ public final class RabbitOutboxPublisher {
         config.rabbitRoutingKey(),
         config.brokerPublisherBatchSize());
 
-    listenerThread = new Thread(this::listenForNotifications, "broker-publish-listener");
-    publisherThread = new Thread(this::publishLoop, "broker-outbox-publisher");
-    listenerThread.start();
-    publisherThread.start();
+    listenerThread = Thread.ofPlatform().name("broker-publish-listener").start(this::listenForNotifications);
+    publisherThread = Thread.ofPlatform().name("broker-outbox-publisher").start(this::publishLoop);
   }
 
   public void stop() {
@@ -200,7 +200,7 @@ public final class RabbitOutboxPublisher {
 
   private void sleepQuietly(long millis) {
     try {
-      Thread.sleep(millis);
+      Thread.sleep(Duration.ofMillis(millis));
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
     }

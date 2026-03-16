@@ -6,6 +6,7 @@ import com.wedocode.queuelab.core.QueueRepository;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -27,10 +28,10 @@ public final class WorkerRuntime {
   private final String runtimeId = UUID.randomUUID().toString().substring(0, 8);
 
   public WorkerRuntime(DataSource dataSource, QueueRepository repository, AppConfig config, JobProcessor processor) {
-    this.dataSource = dataSource;
-    this.repository = repository;
-    this.config = config;
-    this.processor = processor;
+    this.dataSource = Objects.requireNonNull(dataSource, "dataSource nao pode ser nulo");
+    this.repository = Objects.requireNonNull(repository, "repository nao pode ser nulo");
+    this.config = Objects.requireNonNull(config, "config nao pode ser nulo");
+    this.processor = Objects.requireNonNull(processor, "processor nao pode ser nulo");
   }
 
   public void start() {
@@ -38,14 +39,12 @@ public final class WorkerRuntime {
       return;
     }
 
-    listenerThread = new Thread(this::listenForNotifications, "queue-listener");
-    listenerThread.start();
+    listenerThread = Thread.ofPlatform().name("queue-listener").start(this::listenForNotifications);
 
     for (int index = 0; index < config.workerThreads(); index++) {
       var workerId = "worker-" + runtimeId + "-" + index;
-      var thread = new Thread(() -> runWorkerLoop(workerId), workerId);
+      var thread = Thread.ofPlatform().name(workerId).start(() -> runWorkerLoop(workerId));
       workerThreads.add(thread);
-      thread.start();
     }
   }
 
@@ -135,7 +134,7 @@ public final class WorkerRuntime {
       synchronized (wakeSignal) {
         wakeSignal.wait(config.fallbackPollMillis());
       }
-      Thread.sleep(config.idleSleepMillis());
+      Thread.sleep(Duration.ofMillis(config.idleSleepMillis()));
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
     }
@@ -158,7 +157,7 @@ public final class WorkerRuntime {
           return;
         }
         try {
-          Thread.sleep(1500);
+          Thread.sleep(Duration.ofMillis(1500));
         } catch (InterruptedException interruptedException) {
           Thread.currentThread().interrupt();
           return;

@@ -20,11 +20,8 @@ public final class OutboxRelay {
     this.repository = repository;
     this.eventHub = eventHub;
     this.metrics = metrics;
-    this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-      var thread = new Thread(runnable, "outbox-relay");
-      thread.setDaemon(true);
-      return thread;
-    });
+    this.scheduler = Executors.newSingleThreadScheduledExecutor(
+        runnable -> Thread.ofPlatform().daemon(true).name("outbox-relay").unstarted(runnable));
   }
 
   public synchronized void start() {

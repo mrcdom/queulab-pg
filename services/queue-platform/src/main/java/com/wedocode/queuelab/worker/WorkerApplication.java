@@ -16,7 +16,7 @@ public final class WorkerApplication {
     if (config.useRabbitTransport()) {
       var publisher = new RabbitOutboxPublisher(dataSource, repository, config);
       var runtime = new RabbitWorkerRuntime(repository, config, new NotificationJobProcessor(config));
-      Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("worker-shutdown-hook-rabbit").unstarted(() -> {
         runtime.stop();
         publisher.stop();
       }));
@@ -27,7 +27,7 @@ public final class WorkerApplication {
     }
 
     var runtime = new WorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
-    Runtime.getRuntime().addShutdownHook(new Thread(runtime::stop));
+    Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("worker-shutdown-hook").unstarted(runtime::stop));
     runtime.start();
     runtime.await();
   }

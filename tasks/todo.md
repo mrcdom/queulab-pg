@@ -185,3 +185,46 @@ Este plano prioriza execução por IA com passos determinísticos, artefatos ver
 - [x] FIX-C04 - Reforçar fallback por polling quando canal WebSocket não estiver conectado.
 - [x] Validação backend: `mvn -q -f services/queue-platform/pom.xml test`.
 - [x] Validação frontend: `npm --prefix apps/web-console run build`.
+
+## Migração Arquitetural: RabbitMQ + PostgreSQL (2026-03-16)
+
+### R00 - Preparar broker local sem Docker
+
+- [x] Instalar Erlang e RabbitMQ localmente.
+- [x] Criar serviço manual em `/Users/mrcdom/Works/services/rabbitmq` com `run.sh` e `stop.sh`.
+- [x] Gate: start/stop validado (`run.sh` sobe UI 15672 e `stop.sh` encerra).
+
+### R01 - Banco e contrato de publicação
+
+- [x] Criar migration para `message_outbox` e metadados de broker em `job_queue`.
+- [x] Ajustar SQL de enqueue/requeue para persistir publicação no `message_outbox`.
+- [x] Gate: migrações aplicam sem erro e `message_outbox` recebe registros após enqueue.
+
+### R02 - Publisher RabbitMQ com wake-up via LISTEN/NOTIFY
+
+- [x] Adicionar dependência Java do RabbitMQ client.
+- [x] Implementar publisher assíncrono para `message_outbox` com fallback polling.
+- [x] Implementar `LISTEN queue_publish` como wake-up do publisher.
+- [x] Gate: mensagem sai do `message_outbox` e é publicada no RabbitMQ.
+
+### R03 - Worker baseado em RabbitMQ
+
+- [x] Implementar runtime de worker consumidor RabbitMQ.
+- [x] Migrar fluxo de processamento para `ack/nack` mantendo estado e histórico no PostgreSQL.
+- [x] Publicar retry no `message_outbox` para republicação assíncrona.
+- [x] Gate: cenário `happy-path` conclui jobs com consumo pelo broker.
+
+### R04 - Integração da aplicação e validação
+
+- [x] Integrar `ApiApplication` e `WorkerApplication` com publisher + worker RabbitMQ.
+- [x] Validar regressão de outbox de eventos para UI.
+- [x] Gate backend: `mvn -q -f services/queue-platform/pom.xml test`.
+- [x] Gate frontend: `npm --prefix apps/web-console run build`.
+
+### R05 - Benchmark comparativo de performance (PostgreSQL-only vs RabbitMQ)
+
+- [x] Executar matriz comparativa `workers=2 4 8` e `rates=5 10 15` nos dois modos.
+- [x] Executar matriz comparativa `workers=8 12 16` e `rates=20 30 40` nos dois modos.
+- [x] Executar matriz agressiva `workers=16 24 32` e `rates=50 70 90` nos dois modos.
+- [x] Consolidar resultados de safe capacity e throughput observado.
+- [x] Atualizar README com resultados de performance e perfil estável recomendado.

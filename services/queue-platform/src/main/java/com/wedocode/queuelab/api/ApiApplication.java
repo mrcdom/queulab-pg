@@ -138,7 +138,7 @@ public final class ApiApplication {
       ctx.status(HttpStatus.INTERNAL_SERVER_ERROR).json(Map.of("message", exception.getMessage()));
     });
 
-    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+    Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("api-shutdown-hook").unstarted(() -> {
       outboxRelay.stop();
       if (brokerPublisherReference != null) {
         brokerPublisherReference.stop();

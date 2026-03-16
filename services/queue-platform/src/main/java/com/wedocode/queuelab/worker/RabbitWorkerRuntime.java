@@ -8,7 +8,9 @@ import com.wedocode.queuelab.core.JsonSupport;
 import com.wedocode.queuelab.core.QueueRepository;
 import com.wedocode.queuelab.core.QueueStatus;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -27,9 +29,9 @@ public final class RabbitWorkerRuntime {
   private final String runtimeId = UUID.randomUUID().toString().substring(0, 8);
 
   public RabbitWorkerRuntime(QueueRepository repository, AppConfig config, JobProcessor processor) {
-    this.repository = repository;
-    this.config = config;
-    this.processor = processor;
+    this.repository = Objects.requireNonNull(repository, "repository nao pode ser nulo");
+    this.config = Objects.requireNonNull(config, "config nao pode ser nulo");
+    this.processor = Objects.requireNonNull(processor, "processor nao pode ser nulo");
   }
 
   public void start() {
@@ -48,9 +50,8 @@ public final class RabbitWorkerRuntime {
 
     for (int index = 0; index < config.workerThreads(); index++) {
       var workerId = "rabbit-worker-" + runtimeId + "-" + index;
-      var thread = new Thread(() -> runWorkerLoop(workerId), workerId);
+      var thread = Thread.ofPlatform().name(workerId).start(() -> runWorkerLoop(workerId));
       workerThreads.add(thread);
-      thread.start();
     }
   }
 
@@ -181,7 +182,7 @@ public final class RabbitWorkerRuntime {
 
   private void sleepQuietly(long millis) {
     try {
-      Thread.sleep(millis);
+      Thread.sleep(Duration.ofMillis(millis));
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
     }

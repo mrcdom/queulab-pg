@@ -2,8 +2,12 @@ package com.wedocode.queuelab.core;
 
 import java.nio.file.Path;
 import org.flywaydb.core.Flyway;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class MigrationApplication {
+  private static final Logger LOGGER = LoggerFactory.getLogger(MigrationApplication.class);
+
   private MigrationApplication() {
   }
 
@@ -23,6 +27,6 @@ public final class MigrationApplication {
         .load();
 
     flyway.migrate();
-    System.out.println("Migracoes aplicadas com sucesso em: " + migrationsPath);
+    LOGGER.info("Migracoes aplicadas com sucesso em: {}", migrationsPath);
   }
 }
