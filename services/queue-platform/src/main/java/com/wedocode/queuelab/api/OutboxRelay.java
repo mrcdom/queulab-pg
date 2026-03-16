@@ -21,7 +21,7 @@ public final class OutboxRelay {
     this.eventHub = eventHub;
     this.metrics = metrics;
     this.scheduler = Executors.newSingleThreadScheduledExecutor(
-        runnable -> Thread.ofPlatform().daemon(true).name("outbox-relay").unstarted(runnable));
+      runnable -> Thread.ofVirtual().name("outbox-relay").unstarted(runnable));
   }
 
   public synchronized void start() {

@@ -50,7 +50,7 @@ public final class RabbitMqWorkerRuntime {
 
     for (int index = 0; index < config.workerThreads(); index++) {
       var workerId = "rabbit-worker-" + runtimeId + "-" + index;
-      var thread = Thread.ofPlatform().name(workerId).start(() -> runWorkerLoop(workerId));
+      var thread = Thread.ofVirtual().name(workerId).start(() -> runWorkerLoop(workerId));
       workerThreads.add(thread);
     }
   }

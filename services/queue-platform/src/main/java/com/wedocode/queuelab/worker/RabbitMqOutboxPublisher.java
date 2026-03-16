@@ -45,8 +45,8 @@ public final class RabbitMqOutboxPublisher {
         config.rabbitRoutingKey(),
         config.brokerPublisherBatchSize());
 
-    listenerThread = Thread.ofPlatform().name("broker-publish-listener").start(this::listenForNotifications);
-    publisherThread = Thread.ofPlatform().name("broker-outbox-publisher").start(this::publishLoop);
+    listenerThread = Thread.ofVirtual().name("broker-publish-listener").start(this::listenForNotifications);
+    publisherThread = Thread.ofVirtual().name("broker-outbox-publisher").start(this::publishLoop);
   }
 
   public void stop() {
