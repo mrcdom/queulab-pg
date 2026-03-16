@@ -13,7 +13,18 @@ public record AppConfig(
     int heartbeatIntervalSeconds,
     int simulatedMinLatencyMillis,
     int simulatedMaxLatencyMillis,
-    boolean startEmbeddedWorkers
+    boolean startEmbeddedWorkers,
+    String queueTransport,
+    String rabbitHost,
+    int rabbitPort,
+    String rabbitUsername,
+    String rabbitPassword,
+    String rabbitVirtualHost,
+    String rabbitExchange,
+    String rabbitQueue,
+    String rabbitRoutingKey,
+    int rabbitPrefetch,
+    int brokerPublisherBatchSize
 ) {
 
   public static AppConfig fromEnv() {
@@ -30,8 +41,23 @@ public record AppConfig(
         envInt("QUEUE_HEARTBEAT_SECONDS", 10),
         envInt("QUEUE_SIMULATED_MIN_LATENCY_MS", 150),
         envInt("QUEUE_SIMULATED_MAX_LATENCY_MS", 900),
-        envBoolean("QUEUE_START_EMBEDDED_WORKERS", false)
+        envBoolean("QUEUE_START_EMBEDDED_WORKERS", false),
+        env("QUEUE_TRANSPORT", "rabbitmq"),
+        env("QUEUE_RABBIT_HOST", "127.0.0.1"),
+        envInt("QUEUE_RABBIT_PORT", 5672),
+        env("QUEUE_RABBIT_USER", "guest"),
+        env("QUEUE_RABBIT_PASSWORD", "guest"),
+        env("QUEUE_RABBIT_VHOST", "/"),
+        env("QUEUE_RABBIT_EXCHANGE", "jobs.direct"),
+        env("QUEUE_RABBIT_QUEUE", "notification.send.q"),
+        env("QUEUE_RABBIT_ROUTING_KEY", "notification.send"),
+        envInt("QUEUE_RABBIT_PREFETCH", 25),
+        envInt("QUEUE_BROKER_PUBLISH_BATCH_SIZE", 100)
     );
+  }
+
+  public boolean useRabbitTransport() {
+    return "rabbitmq".equalsIgnoreCase(queueTransport());
   }
 
   private static String env(String key, String fallback) {

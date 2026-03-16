@@ -22,6 +22,7 @@ import org.postgresql.util.PGobject;
 
 public final class QueueRepository {
   private final DataSource dataSource;
+  private static final String DEFAULT_EXCHANGE = env("QUEUE_RABBIT_EXCHANGE", "jobs.direct");
 
   public QueueRepository(DataSource dataSource) {
     this.dataSource = dataSource;
@@ -71,6 +72,8 @@ public final class QueueRepository {
               jobVersion,
               payload
           ));
+          insertMessageOutbox(connection, jobId, queueName, correlationId, Instant.now());
+          notifyQueuePublish(connection, queueName);
           connection.commit();
           connection.setAutoCommit(true);
           return new EnqueueResult(jobId, true);
@@ -600,6 +603,8 @@ public final class QueueRepository {
             updated.jobVersion(),
             payload
         ));
+        insertMessageOutbox(connection, updated.id(), updated.queueName(), correlationId, Instant.now());
+        notifyQueuePublish(connection, updated.queueName());
         connection.commit();
         connection.setAutoCommit(true);
         return true;
@@ -607,6 +612,177 @@ public final class QueueRepository {
     } catch (SQLException exception) {
       throw new IllegalStateException("Nao foi possivel reenfileirar o job", exception);
     }
+  }
+
+  public Optional<QueueJob> markJobProcessingFromBroker(long jobId, String workerId, String brokerMessageId, String correlationId) {
+    var sql = """
+        UPDATE job_queue
+        SET status = 'PROCESSING'::queue_status,
+            locked_at = NOW(),
+            locked_by = ?,
+            broker_message_id = ?,
+            consumed_at = NOW(),
+            job_version = job_version + 1,
+            updated_at = NOW()
+        WHERE id = ?
+          AND status IN ('PENDING'::queue_status, 'RETRY'::queue_status)
+        RETURNING *
+        """;
+
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
+      statement.setString(1, workerId);
+      statement.setString(2, brokerMessageId == null ? "" : brokerMessageId);
+      statement.setLong(3, jobId);
+      try (var resultSet = statement.executeQuery()) {
+        if (!resultSet.next()) {
+          connection.commit();
+          connection.setAutoCommit(true);
+          return Optional.empty();
+        }
+        var job = mapJob(resultSet);
+        var payload = JsonNodeFactory.instance.objectNode();
+        payload.put("workerId", workerId);
+        payload.put("attempt", job.attempts() + 1);
+        insertOutboxEvent(connection, QueueEventEnvelope.of(
+            QueueEventType.JOB_CLAIMED,
+            UUID.randomUUID().toString(),
+            Instant.now(),
+            "queue-platform",
+            correlationId,
+            job.queueName(),
+            job.id(),
+            job.jobVersion(),
+            payload
+        ));
+        connection.commit();
+        connection.setAutoCommit(true);
+        return Optional.of(job);
+      }
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Nao foi possivel marcar job como PROCESSING via broker", exception);
+    }
+  }
+
+  public void enqueueBrokerMessage(long jobId, String queueName, Instant nextAttemptAt, String correlationId) {
+    var sql = """
+        INSERT INTO message_outbox (
+          job_id,
+          exchange_name,
+          routing_key,
+          message_id,
+          payload,
+          next_attempt_at
+        )
+        VALUES (?, ?, ?, ?, ?, COALESCE(?, NOW()))
+        """;
+
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
+      statement.setLong(1, jobId);
+      statement.setString(2, DEFAULT_EXCHANGE);
+      statement.setString(3, queueName);
+      var messageId = UUID.randomUUID().toString();
+      statement.setString(4, messageId);
+      var payload = JsonNodeFactory.instance.objectNode();
+      payload.put("jobId", jobId);
+      payload.put("queueName", queueName);
+      payload.put("messageId", messageId);
+      payload.put("correlationId", correlationId == null ? "" : correlationId);
+      statement.setObject(5, jsonb(payload));
+      if (nextAttemptAt == null) {
+        statement.setNull(6, Types.TIMESTAMP_WITH_TIMEZONE);
+      } else {
+        statement.setTimestamp(6, Timestamp.from(nextAttemptAt));
+      }
+      statement.executeUpdate();
+      notifyQueuePublish(connection, queueName);
+      connection.commit();
+      connection.setAutoCommit(true);
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Nao foi possivel enfileirar mensagem para o broker", exception);
+    }
+  }
+
+  public List<MessageOutboxRecord> claimPendingMessageOutbox(int limit) {
+    var sql = """
+        WITH candidates AS (
+          SELECT outbox_id
+          FROM message_outbox
+          WHERE status = 'PENDING'
+            AND next_attempt_at <= NOW()
+          ORDER BY outbox_id
+          FOR UPDATE SKIP LOCKED
+          LIMIT ?
+        )
+        UPDATE message_outbox outbox
+        SET status = 'SENDING',
+            attempts = outbox.attempts + 1,
+            updated_at = NOW()
+        FROM candidates
+        WHERE outbox.outbox_id = candidates.outbox_id
+        RETURNING outbox.outbox_id,
+                  outbox.job_id,
+                  outbox.exchange_name,
+                  outbox.routing_key,
+                  outbox.message_id,
+                  outbox.payload::text,
+                  outbox.attempts
+        """;
+
+    try (var connection = dataSource.getConnection();
+         var statement = connection.prepareStatement(sql)) {
+      connection.setAutoCommit(false);
+      statement.setInt(1, limit);
+      var messages = new ArrayList<MessageOutboxRecord>();
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          messages.add(new MessageOutboxRecord(
+              resultSet.getLong("outbox_id"),
+              resultSet.getLong("job_id"),
+              resultSet.getString("exchange_name"),
+              resultSet.getString("routing_key"),
+              resultSet.getString("message_id"),
+              resultSet.getString("payload"),
+              resultSet.getInt("attempts")
+          ));
+        }
+      }
+      connection.commit();
+      connection.setAutoCommit(true);
+      return messages;
+    } catch (SQLException exception) {
+      throw new IllegalStateException("Nao foi possivel reservar mensagens da message_outbox", exception);
+    }
+  }
+
+  public void markMessageOutboxSent(long outboxId) {
+    var sql = """
+        UPDATE message_outbox
+        SET status = 'SENT',
+            published_at = NOW(),
+            updated_at = NOW(),
+            last_error = NULL
+        WHERE outbox_id = ?
+        """;
+    executeMutation(sql, statement -> statement.setLong(1, outboxId), "Nao foi possivel marcar message_outbox como enviada");
+  }
+
+  public void markMessageOutboxFailed(long outboxId, String errorMessage) {
+    var sql = """
+        UPDATE message_outbox
+        SET status = 'PENDING',
+            next_attempt_at = NOW() + make_interval(secs => LEAST((2 ^ LEAST(attempts, 8))::int, 60)),
+            updated_at = NOW(),
+            last_error = ?
+        WHERE outbox_id = ?
+        """;
+    executeMutation(sql, statement -> {
+      statement.setString(1, errorMessage == null ? "Erro de publicacao no broker" : errorMessage);
+      statement.setLong(2, outboxId);
+    }, "Nao foi possivel registrar falha da message_outbox");
   }
 
   public List<OutboxEvent> claimPendingOutboxEvents(int limit) {
@@ -764,6 +940,53 @@ public final class QueueRepository {
     }
   }
 
+  private void insertMessageOutbox(java.sql.Connection connection, long jobId, String queueName, String correlationId, Instant nextAttemptAt) throws SQLException {
+    var sql = """
+        INSERT INTO message_outbox (
+          job_id,
+          exchange_name,
+          routing_key,
+          message_id,
+          payload,
+          next_attempt_at
+        )
+        VALUES (?, ?, ?, ?, ?, COALESCE(?, NOW()))
+        """;
+
+    var messageId = UUID.randomUUID().toString();
+    var payload = JsonNodeFactory.instance.objectNode();
+    payload.put("jobId", jobId);
+    payload.put("queueName", queueName);
+    payload.put("messageId", messageId);
+    payload.put("correlationId", correlationId == null ? "" : correlationId);
+
+    try (var statement = connection.prepareStatement(sql)) {
+      statement.setLong(1, jobId);
+      statement.setString(2, DEFAULT_EXCHANGE);
+      statement.setString(3, queueName);
+      statement.setString(4, messageId);
+      statement.setObject(5, jsonb(payload));
+      if (nextAttemptAt == null) {
+        statement.setNull(6, Types.TIMESTAMP_WITH_TIMEZONE);
+      } else {
+        statement.setTimestamp(6, Timestamp.from(nextAttemptAt));
+      }
+      statement.executeUpdate();
+    }
+  }
+
+  private void notifyQueuePublish(java.sql.Connection connection, String queueName) throws SQLException {
+    try (var statement = connection.prepareStatement("SELECT pg_notify('queue_publish', ?)")) {
+      statement.setString(1, queueName == null ? "default" : queueName);
+      statement.execute();
+    }
+  }
+
+  private static String env(String key, String fallback) {
+    var value = System.getenv(key);
+    return value == null || value.isBlank() ? fallback : value;
+  }
+
   private long scalarLong(String sql) {
         try (var connection = dataSource.getConnection();
           var statement = connection.createStatement();
@@ -819,5 +1042,16 @@ public final class QueueRepository {
   }
 
   public record RetryResult(QueueStatus status, int attempts, Instant availableAt, QueueJob job) {
+  }
+
+  public record MessageOutboxRecord(
+      long outboxId,
+      long jobId,
+      String exchangeName,
+      String routingKey,
+      String messageId,
+      String payload,
+      int attempts
+  ) {
   }
 }

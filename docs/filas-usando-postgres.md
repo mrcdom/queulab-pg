@@ -1,381 +1,540 @@
-# Arquitetura de Filas com PostgreSQL (Substituto de Broker)
+# Arquitetura de Filas com RabbitMQ e PostgreSQL
 
 ## 1. Objetivo
 
-Este documento descreve uma arquitetura para usar PostgreSQL como substituto de provedor de filas em cenarios de processamento assincrono, com:
+Este documento descreve a arquitetura alvo para processamento assíncrono com:
 
-- Enfileiramento transacional no proprio banco
-- Sinalizacao com LISTEN/NOTIFY para reduzir polling agressivo
-- Consumo concorrente seguro com `FOR UPDATE SKIP LOCKED`
-- Retry, backoff, DLQ e observabilidade
+- RabbitMQ como transporte principal de mensagens
+- PostgreSQL como SGBD transacional já adotado pelos sistemas que usarão a solução
+- PostgreSQL como store de estado operacional, histórico, deduplicação e observabilidade
+- LISTEN/NOTIFY como mecanismo de wake-up para publicação assíncrona e para trilha de auditoria de mudanças do SGBD em uma base de auditoria separada
+- WebSocket e outbox para atualização em tempo real do monitor
 
-O foco e confiabilidade operacional e simplicidade de stack quando um broker dedicado nao e obrigatorio.
+O objetivo é maximizar a capacidade de escala da solução sem descartar o papel natural do PostgreSQL nos projetos que já o utilizam como banco de dados principal.
 
-## 2. Quando usar Postgres como fila
+## 2. Decisão Arquitetural
+
+Nesta arquitetura, PostgreSQL deixa de ser o mecanismo de entrega da fila e passa a cumprir quatro papéis principais:
+
+1. Persistência transacional de dados de negócio.
+2. Registro oficial do estado de cada job.
+3. Histórico operacional e trilha de execução.
+4. Fonte de auditoria das mudanças relevantes no banco.
+
+RabbitMQ assume o que ele faz melhor:
+
+1. Enfileiramento de alta vazão.
+2. Distribuição eficiente para múltiplos consumidores.
+3. Ack/nack por mensagem.
+4. Retry, DLQ e roteamento por exchange/queue.
+
+## 3. Quando usar esta arquitetura
 
 Use quando:
 
-1. A aplicacao ja depende fortemente de PostgreSQL.
-2. O volume e moderado e previsivel.
-3. A equipe quer reduzir componentes operacionais.
-4. E importante manter transacao unica entre escrita de negocio e enfileiramento (outbox-like).
+1. Os sistemas já usam PostgreSQL como banco principal.
+2. O throughput esperado é alto o suficiente para que PostgreSQL puro como fila se torne gargalo.
+3. É necessário escalar consumidores horizontalmente com menor contention no banco.
+4. Há necessidade clara de DLQ, retry e roteamento mais nativos de broker.
+5. O histórico e o estado do processamento precisam continuar no banco relacional.
 
 Evite quando:
 
-1. O throughput exigido e muito alto e continuo.
-2. Sao necessarias features nativas de broker (fan-out massivo, replay longo, stream retention complexa).
-3. Ha muitos consumidores heterogeneos com necessidade de roteamento avancado.
+1. O volume é baixo e a simplicidade operacional é mais importante que throughput.
+2. A equipe não quer operar um broker adicional.
+3. O caso de uso é puramente síncrono ou quase síncrono.
 
-## 3. Principios da Arquitetura
+## 4. Princípios da Arquitetura
 
-1. PostgreSQL e a fonte da verdade da fila.
-2. NOTIFY e apenas wake-up de workers, nao transporte do payload.
-3. Consumidor deve fazer claim atomico do trabalho.
-4. Mensagem nunca e removida sem rastreabilidade.
-5. Retry e DLQ sao explicitos no modelo de dados.
+1. RabbitMQ é o transporte da mensagem; PostgreSQL é a fonte da verdade do estado.
+2. Estado do job e entrega da mensagem não são a mesma coisa e devem ser modelados separadamente.
+3. Publicação para RabbitMQ deve sair de um outbox transacional no PostgreSQL.
+4. Consumidor deve ser idempotente, porque redelivery continua possível.
+5. `LISTEN/NOTIFY` pode ser usado como wake-up pós-commit para o publisher de outbox, mas nunca como transporte da mensagem de negócio.
+6. Auditoria do banco não depende do broker; ela usa PostgreSQL + LISTEN/NOTIFY.
+7. Eventos de UI continuam desacoplados do caminho crítico por meio de outbox próprio.
 
-## 4. Componentes
+## 5. Componentes
 
-### 4.1 Tabela de fila
+### 5.1 PostgreSQL de aplicação
 
-Persistencia de mensagens, status, tentativas e agendamento de proxima execucao.
+Mantém:
 
-### 4.2 Produtor
+- tabelas de negócio
+- registro de jobs
+- histórico de execução
+- outbox de publicação para RabbitMQ
+- outbox de eventos para monitor em tempo real
+- estruturas de auditoria do banco
 
-Insere mensagem na fila na mesma transacao do evento de negocio.
+### 5.2 Publisher de outbox para RabbitMQ
 
-### 4.3 Worker
+Processo dedicado que lê registros pendentes no PostgreSQL, publica no RabbitMQ com publisher confirms e marca a publicação como concluída. Esse processo pode ser acordado por `LISTEN/NOTIFY` após o commit da transação da aplicação, mantendo polling leve como fallback.
 
-Busca lotes prontos, faz claim com lock, processa, confirma sucesso ou agenda retry.
+### 5.3 RabbitMQ
 
-### 4.4 Notifier
+Responsável por:
 
-Trigger no insert/update relevante que executa `pg_notify` para acordar workers rapidamente.
+- exchange de entrada
+- queues de processamento por workload
+- DLQ por rota
+- filas de retry via TTL e dead-letter exchange
 
-## 5. Modelo de Dados
+### 5.4 Workers
 
-O schema é composto por quatro tabelas, criadas em duas migrações:
+Consumidores do RabbitMQ que:
 
-### 5.1 V001 — Fila, workers e histórico
+1. recebem mensagem
+2. processam a carga
+3. atualizam o estado do job no PostgreSQL
+4. registram histórico
+5. fazem `ack`, `nack` ou roteiam para retry/DLQ conforme o resultado
+
+### 5.5 Relay de eventos para UI
+
+Processo que lê `event_outbox`, envia eventos para o monitor via WebSocket e mantém replay curto por cursor.
+
+### 5.6 Relay de auditoria do banco
+
+Processo dedicado que usa `LISTEN/NOTIFY` apenas como wake-up para mudanças auditáveis no PostgreSQL e grava os eventos correspondentes em uma base de auditoria separada.
+
+## 6. Topologia recomendada do RabbitMQ
+
+Topologia lógica mínima:
+
+```text
+producer
+  -> exchange jobs.direct ou jobs.topic
+  -> queue por tipo de trabalho
+  -> retry queue com TTL
+  -> dead-letter exchange
+  -> dead-letter queue
+```
+
+Exemplo:
+
+- exchange: `jobs.direct`
+- queue principal: `notification.send.q`
+- retry queue: `notification.send.retry.q`
+- DLQ: `notification.send.dlq`
+- routing key: `notification.send`
+
+Estratégia recomendada:
+
+1. Uma queue principal por workload relevante.
+2. Uma DLQ por domínio operacional, não necessariamente por consumidor individual.
+3. Retry com TTL e dead-lettering, não com sleep no worker.
+4. Prefetch controlado para evitar explosão de memória e unfair dispatch.
+
+## 7. Modelo de Dados no PostgreSQL
+
+O PostgreSQL continua central para o estado do processamento, mas não mais para a disputa de consumo da fila.
+
+### 7.1 Registro de jobs
+
+A tabela `job_queue` pode ser preservada, mas com mudança conceitual: ela passa a ser um ledger operacional do job, não a fila física de entrega.
+
+Campos que continuam fazendo sentido:
+
+- `id`
+- `queue_name`
+- `dedup_key`
+- `payload`
+- `status`
+- `attempts`
+- `max_attempts`
+- `last_error`
+- `job_version`
+- `created_at`
+- `updated_at`
+
+Campos que deixam de representar claim SQL e passam a ser opcionais ou sem papel central:
+
+- `available_at`
+- `locked_at`
+- `locked_by`
+
+Campos recomendados para a arquitetura com RabbitMQ:
 
 ```sql
-CREATE TYPE queue_status AS ENUM ('PENDING', 'PROCESSING', 'RETRY', 'DONE', 'FAILED');
+ALTER TABLE job_queue
+  ADD COLUMN IF NOT EXISTS exchange_name TEXT,
+  ADD COLUMN IF NOT EXISTS routing_key TEXT,
+  ADD COLUMN IF NOT EXISTS broker_message_id TEXT,
+  ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+```
 
-CREATE TABLE job_queue (
-  id BIGSERIAL PRIMARY KEY,
-  queue_name TEXT NOT NULL,
-  dedup_key TEXT,
+### 7.2 Outbox de publicação para RabbitMQ
+
+Novo artefato recomendado:
+
+```sql
+CREATE TABLE message_outbox (
+  outbox_id BIGSERIAL PRIMARY KEY,
+  job_id BIGINT NOT NULL REFERENCES job_queue(id) ON DELETE CASCADE,
+  exchange_name TEXT NOT NULL,
+  routing_key TEXT NOT NULL,
+  message_id TEXT NOT NULL UNIQUE,
   payload JSONB NOT NULL,
-  status queue_status NOT NULL DEFAULT 'PENDING',
-  available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  headers JSONB,
+  status TEXT NOT NULL DEFAULT 'PENDING',
   attempts INT NOT NULL DEFAULT 0,
-  max_attempts INT NOT NULL DEFAULT 8,
-  locked_at TIMESTAMPTZ,
-  locked_by TEXT,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  published_at TIMESTAMPTZ,
   last_error TEXT,
-  job_version BIGINT NOT NULL DEFAULT 1,   -- versao incrementada a cada transicao de status
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- claim concorrente (global)
-CREATE INDEX idx_job_queue_pick
-  ON job_queue (status, available_at, id)
-  WHERE status IN ('PENDING', 'RETRY');
-
--- claim concorrente por nome de fila
-CREATE INDEX idx_job_queue_queue_pick
-  ON job_queue (queue_name, status, available_at, id)
-  WHERE status IN ('PENDING', 'RETRY');
-
--- reconciliacao de jobs travados
-CREATE INDEX idx_job_queue_stuck
-  ON job_queue (status, locked_at)
-  WHERE status = 'PROCESSING';
-
--- versionamento para publicacao de eventos
-CREATE INDEX idx_job_queue_version
-  ON job_queue (id, job_version);
-
--- deduplicacao de jobs pendentes/em processamento
-CREATE UNIQUE INDEX uq_job_queue_dedup
-  ON job_queue (queue_name, dedup_key)
-  WHERE dedup_key IS NOT NULL
-    AND status IN ('PENDING', 'PROCESSING', 'RETRY');
-
--- instancias de workers ativas e seus contadores
-CREATE TABLE worker_registry (
-  worker_id TEXT PRIMARY KEY,
-  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_heartbeat_at TIMESTAMPTZ NOT NULL,
-  status TEXT NOT NULL,
-  processed_count BIGINT NOT NULL DEFAULT 0,
-  failed_count BIGINT NOT NULL DEFAULT 0
-);
-
--- historico completo de execucoes por job
-CREATE TABLE job_execution_history (
-  execution_id BIGSERIAL PRIMARY KEY,
-  job_id BIGINT NOT NULL REFERENCES job_queue (id) ON DELETE CASCADE,
-  worker_id TEXT NOT NULL,
-  attempt_number INT NOT NULL,
-  outcome TEXT NOT NULL,
-  error_message TEXT,
-  started_at TIMESTAMPTZ NOT NULL,
-  finished_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX idx_job_execution_history_job_id
-  ON job_execution_history (job_id, started_at DESC);
+CREATE INDEX idx_message_outbox_pending
+  ON message_outbox (status, next_attempt_at, outbox_id)
+  WHERE status = 'PENDING';
 ```
 
-### 5.2 V002 — Outbox de eventos
+Essa tabela garante publicação confiável sem depender de uma transação distribuída entre PostgreSQL e RabbitMQ.
 
-A tabela `event_outbox` desacopla a publicação de eventos em tempo real do processamento dos jobs. O conteúdo e propósito desta tabela estão descritos na seção 11.
+### 7.3 Histórico e registro de workers
 
-## 6. Producao da Mensagem
+Continuam úteis:
 
-Padrao recomendado:
+- `worker_registry`
+- `job_execution_history`
 
-1. Executar alteracao de negocio.
-2. Inserir registro em `job_queue` na mesma transacao.
-3. Commit unico.
+Essas tabelas seguem no PostgreSQL porque são dados operacionais e analíticos, não dados de transporte.
 
-Isso evita inconsistencias do tipo "negocio confirmado, mensagem perdida".
+### 7.4 Outbox de eventos para UI
+
+`event_outbox` permanece e continua correta para monitoramento em tempo real.
+
+### 7.5 Outbox de auditoria do SGBD
+
+Para auditoria de mudanças do banco com destino a uma base de auditoria separada, recomenda-se:
+
+```sql
+CREATE TABLE audit_outbox (
+  audit_id BIGSERIAL PRIMARY KEY,
+  aggregate_table TEXT NOT NULL,
+  aggregate_key TEXT NOT NULL,
+  operation_type TEXT NOT NULL,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  payload JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  sent_at TIMESTAMPTZ,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_audit_outbox_pending
+  ON audit_outbox (status, audit_id)
+  WHERE status = 'PENDING';
+```
+
+## 8. Produção da Mensagem
+
+Padrão recomendado:
+
+1. Executar alteração de negócio.
+2. Inserir ou atualizar o registro correspondente em `job_queue`.
+3. Inserir uma linha em `message_outbox` na mesma transação.
+4. Commit único no PostgreSQL.
+5. Após o commit, a aplicação ou trigger associada executa `pg_notify('queue_publish', queue_name)` como wake-up.
+6. Processo assíncrono publica no RabbitMQ lendo o `message_outbox` depois do commit.
+
+Isso evita inconsistências do tipo "negócio confirmado, mensagem perdida" sem exigir XA/2PC, ao mesmo tempo em que reduz a latência entre commit e publicação no broker.
 
 Exemplo:
 
 ```sql
 BEGIN;
 
--- atualizacao de negocio
-UPDATE appointments SET status = 'READY_TO_NOTIFY' WHERE id = 123;
+UPDATE appointments
+SET status = 'READY_TO_NOTIFY'
+WHERE id = 123;
 
--- enfileiramento
-INSERT INTO job_queue (queue_name, dedup_key, payload)
+INSERT INTO job_queue (
+  queue_name,
+  dedup_key,
+  payload,
+  status,
+  exchange_name,
+  routing_key,
+  job_version
+)
 VALUES (
   'notification.send',
   'appointment:123:reminder',
-  jsonb_build_object('appointmentId', 123, 'channel', 'WHATSAPP')
+  jsonb_build_object('appointmentId', 123, 'channel', 'WHATSAPP'),
+  'PENDING',
+  'jobs.direct',
+  'notification.send',
+  1
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT DO NOTHING
+RETURNING id;
+
+INSERT INTO message_outbox (
+  job_id,
+  exchange_name,
+  routing_key,
+  message_id,
+  payload
+)
+VALUES (
+  $job_id,
+  'jobs.direct',
+  'notification.send',
+  gen_random_uuid()::text,
+  jsonb_build_object('jobId', $job_id)
+);
 
 COMMIT;
 ```
 
-## 7. Claim de Trabalho (consumo concorrente)
+Observação importante: a mensagem publicada no RabbitMQ deve carregar apenas o mínimo necessário. Em geral, publicar `jobId`, `messageId`, `dedupKey` e metadados é melhor do que duplicar o payload inteiro do domínio em todo o pipeline.
 
-Padrao seguro para N workers concorrentes:
+Wake-up opcional após commit:
 
 ```sql
-WITH cte AS (
-  SELECT id
-  FROM job_queue
-  WHERE queue_name = $1
-    AND status IN ('PENDING', 'RETRY')
-    AND available_at <= NOW()
-  ORDER BY available_at, id
-  FOR UPDATE SKIP LOCKED
-  LIMIT $2
-)
-UPDATE job_queue q
+SELECT pg_notify('queue_publish', 'notification.send');
+```
+
+Regras para esse canal:
+
+1. O payload canônico de publicação continua no `message_outbox`.
+2. O texto do `NOTIFY` serve apenas para acordar o publisher e, no máximo, indicar a fila ou rota afetada.
+3. Se a notificação se perder, o publisher continua recuperando o trabalho pendente por polling leve.
+
+## 9. Consumo com RabbitMQ
+
+O worker deixa de fazer claim em SQL. O fluxo passa a ser:
+
+1. RabbitMQ entrega a mensagem ao worker.
+2. Worker abre transação no PostgreSQL.
+3. Worker marca o job como `PROCESSING` e incrementa `job_version`.
+4. Worker executa a lógica.
+5. Worker marca `DONE`, `RETRY` ou `FAILED` no PostgreSQL.
+6. Worker registra histórico em `job_execution_history`.
+7. Worker confirma no RabbitMQ com `ack` em sucesso ou roteamento controlado de retry/DLQ em falha.
+
+Exemplo de atualização de início do processamento:
+
+```sql
+UPDATE job_queue
 SET status = 'PROCESSING',
+    locked_by = $worker_id,
     locked_at = NOW(),
-    locked_by = $3,
+    broker_message_id = $message_id,
+    consumed_at = NOW(),
+    job_version = job_version + 1,
     updated_at = NOW()
-FROM cte
-WHERE q.id = cte.id
-RETURNING q.id, q.payload, q.attempts, q.max_attempts;
+WHERE id = $job_id;
 ```
 
-Esse padrao evita que dois workers processem a mesma mensagem ao mesmo tempo.
+### 9.1 Ack e retry
 
-## 8. Confirmacao, Retry e DLQ
+Política recomendada:
 
-### 8.1 Sucesso
+1. Sucesso: atualizar PostgreSQL e depois `ack`.
+2. Falha transitória: atualizar PostgreSQL para `RETRY`, publicar em retry queue ou `nack` para fluxo de retry configurado.
+3. Falha permanente: atualizar PostgreSQL para `FAILED` e encaminhar para DLQ.
 
-```sql
-UPDATE job_queue
-SET status = 'DONE',
-    updated_at = NOW()
-WHERE id = $1
-  AND status = 'PROCESSING'
-  AND locked_by = $2;
-```
+O retry preferencialmente deve ser gerido pelo broker, com TTL e dead-lettering, e não por polling no banco.
 
-### 8.2 Falha com retry exponencial
+### 9.2 Idempotência
 
-Backoff sugerido: $delay = min(2^attempts, 900)$ segundos.
+Como RabbitMQ pode reenviar mensagens, o consumidor deve ser idempotente por:
 
-```sql
-UPDATE job_queue
-SET attempts = attempts + 1,
-    status = CASE
-      WHEN attempts + 1 >= max_attempts THEN 'FAILED'
-      ELSE 'RETRY'
-    END,
-    available_at = CASE
-      WHEN attempts + 1 >= max_attempts THEN available_at
-      ELSE NOW() + make_interval(secs => LEAST((2 ^ (attempts + 1))::int, 900))
-    END,
-    last_error = $2,
-    locked_at = NULL,
-    locked_by = NULL,
-    updated_at = NOW()
-WHERE id = $1
-  AND status = 'PROCESSING';
-```
+- `job_id`
+- `dedup_key`
+- `message_id`
 
-### 8.3 Dead Letter Queue
+## 10. Dead Letter Queue
 
-`status = 'FAILED'` representa DLQ logica.
+Nesta arquitetura, a DLQ física passa a ser do RabbitMQ.
 
-Opcionalmente, use tabela separada para historico de DLQ:
+O PostgreSQL continua registrando o estado lógico do job com `status = 'FAILED'` para:
 
-```sql
-CREATE TABLE job_queue_dlq (
-  dlq_id BIGSERIAL PRIMARY KEY,
-  original_job_id BIGINT NOT NULL,
-  queue_name TEXT NOT NULL,
-  payload JSONB NOT NULL,
-  attempts INT NOT NULL,
-  error TEXT,
-  failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
+- consulta operacional
+- reprocessamento manual
+- dashboard
+- relatórios
 
-## 9. LISTEN/NOTIFY para wake-up
+Isso cria a separação correta:
 
-Dois triggers disparam `pg_notify('job_queue_new', queue_name)` — um no INSERT de novos jobs, outro no UPDATE quando um job volta a ficar disponível (status `PENDING` ou `RETRY` com `available_at <= NOW()`):
+1. RabbitMQ guarda a mensagem morta para fins de transporte.
+2. PostgreSQL guarda o estado morto para fins operacionais e históricos.
+
+## 11. LISTEN/NOTIFY para Wake-up do Publisher e Auditoria do PostgreSQL
+
+`LISTEN/NOTIFY` deixa de ter papel no wake-up de workers, mas continua útil em dois cenários:
+
+1. acordar rapidamente o publisher de `message_outbox` após o commit
+2. acordar o relay de auditoria para mudanças do SGBD
+
+### 11.1 Wake-up do publisher de outbox
+
+Fluxo recomendado:
+
+1. A aplicação grava `job_queue` e `message_outbox` na mesma transação.
+2. Após o commit, dispara `pg_notify('queue_publish', queue_name)`.
+3. Um `OutboxPublisher` mantém uma conexão dedicada com `LISTEN queue_publish`.
+4. Ao receber o wake-up, ele consulta `message_outbox` pendente e publica no RabbitMQ.
+5. Se nenhuma notificação chegar, polling leve garante progresso eventual.
+
+Exemplo:
 
 ```sql
-CREATE OR REPLACE FUNCTION notify_job_queue()
-RETURNS trigger AS $$
-BEGIN
-  IF NEW.status IN ('PENDING', 'RETRY') THEN
-    PERFORM pg_notify('job_queue_new', NEW.queue_name);
-  END IF;
-  RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
--- acorda workers ao enfileirar novos jobs
-CREATE TRIGGER trg_notify_job_queue_insert
-AFTER INSERT ON job_queue
-FOR EACH ROW
-EXECUTE FUNCTION notify_job_queue();
-
--- acorda workers quando um job em retry se torna disponivel
-CREATE TRIGGER trg_notify_job_queue_retry
-AFTER UPDATE OF status, available_at ON job_queue
-FOR EACH ROW
-WHEN (NEW.status IN ('PENDING', 'RETRY') AND NEW.available_at <= NOW())
-EXECUTE FUNCTION notify_job_queue();
+SELECT pg_notify('queue_publish', 'notification.send');
 ```
 
 Regras importantes:
 
-- NOTIFY não substitui a consulta no banco — é apenas wake-up.
-- Worker sempre deve consultar a tabela com claim atômico.
-- Em perda de notificação, polling leve periódico (fallback) garante progresso.
-- Em conexões via PgBouncer em mode `transaction pooling`, a conexão de LISTEN precisa ser dedicada (fora do pool). Ver seção 12.
+1. `NOTIFY` não carrega a mensagem de negócio.
+2. O payload oficial da publicação vem sempre de `message_outbox`.
+3. A conexão de `LISTEN` deve ser dedicada.
+4. Em uso de PgBouncer com `transaction pooling`, o listener deve ficar fora desse pool.
 
-## 10. Recuperacao e Reconciliacao
+### 11.2 Auditoria do banco
 
-### 10.1 Mensagens presas em PROCESSING
+Fluxo recomendado:
 
-Se worker cair no meio do processamento, executar job de reconciliacao:
+1. Triggers em tabelas relevantes gravam um registro em `audit_outbox`.
+2. A mesma trigger executa `pg_notify('audit_change', '<table-name>')`.
+3. Um `AuditRelay` mantém uma conexão dedicada com `LISTEN audit_change`.
+4. Ao receber o wake-up, ele busca registros pendentes em `audit_outbox`.
+5. O relay persiste os eventos em uma base de auditoria separada.
+6. Após sucesso, marca o item auditado como enviado.
 
-```sql
-UPDATE job_queue
-SET status = 'RETRY',
-    locked_at = NULL,
-    locked_by = NULL,
-    available_at = NOW(),
-    updated_at = NOW()
-WHERE status = 'PROCESSING'
-  AND locked_at < NOW() - INTERVAL '10 minutes';
-```
-
-### 10.2 Idempotencia no consumidor
-
-Mesmo com claim seguro, o processamento deve ser idempotente (por `dedup_key` ou `job_id`) para proteger contra reexecucao apos falhas.
-
-## 11. Outbox de Eventos para Observabilidade em Tempo Real
-
-A tabela `event_outbox` (V002) implementa o padrão **Transactional Outbox**: quando um job muda de estado, a aplicação grava um evento em `event_outbox` dentro da mesma transação da atualização do job. Isso garante consistência — não existe transição de status sem evento correspondente, e não existe evento sem transição de status.
+Exemplo:
 
 ```sql
-CREATE TABLE event_outbox (
-  outbox_id BIGSERIAL PRIMARY KEY,
-  event_id TEXT NOT NULL UNIQUE,         -- UUID, garante idempotencia na entrega
-  aggregate_type TEXT NOT NULL,          -- ex: 'job'
-  aggregate_id BIGINT NOT NULL,          -- job_id
-  aggregate_version BIGINT NOT NULL,     -- job_version na hora do evento
-  occurred_at TIMESTAMPTZ NOT NULL,
-  payload JSONB NOT NULL,
-  status TEXT NOT NULL DEFAULT 'PENDING',
-  attempts INT NOT NULL DEFAULT 0,
-  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_error TEXT,
-  sent_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+CREATE OR REPLACE FUNCTION notify_audit_change()
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO audit_outbox (
+    aggregate_table,
+    aggregate_key,
+    operation_type,
+    payload
+  )
+  VALUES (
+    TG_TABLE_NAME,
+    COALESCE(NEW.id::text, OLD.id::text),
+    TG_OP,
+    jsonb_build_object(
+      'old', to_jsonb(OLD),
+      'new', to_jsonb(NEW)
+    )
+  );
 
--- leitura de eventos pendentes para entrega
-CREATE INDEX idx_event_outbox_pending
-  ON event_outbox (status, next_attempt_at, outbox_id)
-  WHERE status = 'PENDING';
-
--- cursor para leitura incremental (WebSocket catch-up)
-CREATE INDEX idx_event_outbox_cursor
-  ON event_outbox (outbox_id, created_at);
+  PERFORM pg_notify('audit_change', TG_TABLE_NAME);
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
 ```
 
-Um processo dedicado (`OutboxRelay`) lê eventos `PENDING` em loop, entrega via WebSocket a todos os clientes conectados (`QueueEventHub`) e marca o evento como `SENT`. Clientes que reconectam usam o índice de cursor para receber todos os eventos perdidos desde o último `outbox_id` recebido — o frontend nunca perde uma transição de estado mesmo após queda de conexão.
+Regras importantes:
 
-Essa separação tem implicações importantes:
+1. `NOTIFY` continua sendo apenas wake-up.
+2. O payload canônico de auditoria vem do `audit_outbox`, não do texto da notificação.
+3. A conexão de `LISTEN` deve ser dedicada.
+4. Em uso de PgBouncer com `transaction pooling`, o listener deve ficar fora desse pool.
 
-- O caminho crítico do worker (claim → process → ack) não depende de nenhum cliente WebSocket estar conectado.
-- A entrega de eventos tem retry próprio, independente do retry de jobs.
-- O `event_id` único garante idempotência: reenviar o mesmo evento ao cliente não causa duplicação na UI.
+## 12. Eventos para Observabilidade em Tempo Real
 
-## 12. Escalabilidade
+`event_outbox` permanece com o mesmo papel: desacoplar a atualização da UI do caminho crítico de processamento.
 
-### 12.1 Vertical
+Quando o job muda de estado, a aplicação grava um evento em `event_outbox` na mesma transação da mudança do job. Um relay assíncrono entrega esse evento via WebSocket ao monitor.
 
-Escala bem para volume moderado, desde que:
+Essa parte continua válida porque:
 
-- índices estejam corretos
-- queries de claim sejam curtas
-- lotes tenham tamanho controlado
+1. UI não deve depender diretamente do RabbitMQ.
+2. O monitor precisa enxergar o estado oficial do PostgreSQL, não apenas o tráfego do broker.
+3. Replay curto por cursor continua simples e determinístico com `event_outbox`.
 
-### 12.2 Horizontal
+## 13. Recuperação e Reprocessamento
 
-Adicionar workers concorrentes e ajustar:
+### 13.1 Falha antes da publicação no RabbitMQ
 
-- `LIMIT` de claim por worker
-- número de conexões no pool
-- taxa de polling fallback
-- `worker_registry` rastreia instâncias; o heartbeat mantém o registro atualizado para reconciliação correta de jobs órfãos entre instâncias.
+Se a aplicação caiu após o commit no PostgreSQL e antes da publicação no broker, o `message_outbox` continua `PENDING` e o publisher assíncrono retoma o envio. A perda do `NOTIFY` não compromete a confiabilidade, porque ele é apenas wake-up.
 
-Quando throughput crescer além do razoável para um único Postgres, a próxima etapa é RabbitMQ como transporte de mensagens, mantendo PostgreSQL como store de estado e histórico. Para streaming massivo com replay ou múltiplos consumidores independentes, Kafka ou Pulsar. Ver [estrategia-de-escala.md](estrategia-de-escala.md) para a análise completa com limites por regime de carga e ordem de implementação por ROI.
+### 13.2 Falha no worker após receber a mensagem
 
-## 13. Observabilidade
+RabbitMQ pode redeliver a mensagem. O worker precisa ser idempotente e o PostgreSQL precisa registrar tentativas e resultado.
 
-Metricas minimas:
+### 13.3 Reprocessamento manual
+
+O reprocessamento manual deve:
+
+1. atualizar o estado do job no PostgreSQL
+2. gerar nova linha em `message_outbox`
+3. republicar para o RabbitMQ
+
+## 14. Escalabilidade
+
+### 14.1 Horizontal
+
+O ganho principal desta arquitetura vem de mover a contenção do banco para o broker apropriado.
+
+Escala horizontal agora ocorre principalmente por:
+
+1. mais consumidores na mesma queue
+2. filas separadas por workload
+3. exchanges com roteamento por domínio
+4. tuning de prefetch e concorrência por worker
+
+### 14.2 Papel do PostgreSQL na escala
+
+O PostgreSQL deixa de participar do caminho de disputa da fila, mas ainda precisa escalar para:
+
+1. escrita de estado do job
+2. histórico de execução
+3. leitura de dashboard
+4. publicação de outbox
+5. auditoria
+
+O esforço de escala passa a ser melhor distribuído:
+
+- RabbitMQ absorve burst, roteamento e entrega
+- PostgreSQL absorve estado, histórico e consulta
+
+### 14.3 Ordem de implementação por ROI
+
+1. Introduzir `message_outbox` no PostgreSQL.
+2. Criar publisher assíncrono com publisher confirms para RabbitMQ e `LISTEN queue_publish` em conexão dedicada.
+3. Introduzir exchanges, queues, retry queues e DLQs por workload.
+4. Adaptar workers para consumo RabbitMQ com idempotência.
+5. Manter `event_outbox` para monitor e `audit_outbox` para auditoria.
+6. Separar API, publisher, workers, relay de eventos e relay de auditoria em processos independentes.
+
+## 15. Observabilidade
+
+Métricas mínimas recomendadas:
+
+### 15.1 RabbitMQ
+
+- `rabbitmq_queue_depth`
+- `rabbitmq_publish_rate`
+- `rabbitmq_ack_rate`
+- `rabbitmq_redelivery_rate`
+- `rabbitmq_dlq_depth`
+
+### 15.2 PostgreSQL
 
 - `queue_jobs_pending`
 - `queue_jobs_processing`
 - `queue_jobs_retry`
 - `queue_jobs_failed`
-- `queue_claim_latency_ms`
 - `queue_processing_latency_ms`
 - `queue_retries_total`
 - `queue_dlq_total`
+- `message_outbox_pending`
+- `event_outbox_pending`
+- `audit_outbox_pending`
 
-Consultas operacionais úteis:
+Consultas úteis:
 
 ```sql
 SELECT status, count(*)
@@ -384,96 +543,74 @@ GROUP BY status;
 
 SELECT queue_name, count(*)
 FROM job_queue
-WHERE status IN ('PENDING', 'RETRY')
-  AND available_at <= NOW()
+WHERE status IN ('PENDING', 'PROCESSING', 'RETRY', 'FAILED')
 GROUP BY queue_name;
 
--- instancias de workers registradas e ultimo heartbeat
 SELECT worker_id, status, last_heartbeat_at, processed_count, failed_count
 FROM worker_registry
 ORDER BY last_heartbeat_at DESC;
 
--- historico de execucoes de um job especifico
 SELECT attempt_number, outcome, error_message, started_at, finished_at
 FROM job_execution_history
 WHERE job_id = $1
 ORDER BY started_at;
 ```
 
-Além das consultas SQL, a solução expõe um dashboard React atualizado em tempo real via WebSocket. Cada transição de status gera um evento no `event_outbox`; o `OutboxRelay` entrega esse evento ao frontend sem necessidade de polling. O cliente mantém um cursor (`outbox_id`) para recuperar eventos perdidos após reconexão.
-
 Alertas sugeridos:
 
-1. Backlog acima de limiar por mais de N minutos.
-2. Crescimento acelerado de `FAILED`.
-3. Jobs em `PROCESSING` além do timeout.
-4. Workers sem heartbeat por mais de 2× `QUEUE_HEARTBEAT_SECONDS`.
+1. Crescimento de backlog nas queues do RabbitMQ acima do limiar.
+2. Crescimento da DLQ do RabbitMQ.
+3. Acúmulo anormal em `message_outbox`.
+4. `event_outbox` ou `audit_outbox` represados.
+5. Jobs em `PROCESSING` por tempo acima do esperado.
+6. Redelivery alto no RabbitMQ, indicando falha sistêmica de consumidores.
 
-## 14. Segurança
+## 16. Segurança
 
-1. Payload sem dados sensíveis desnecessários.
-2. Criptografar campos sensíveis quando inevitável.
-3. Separar roles SQL de produtor e consumidor.
-4. Aplicar TLS nas conexões de aplicação com banco.
-5. Auditar acessos administrativos de reprocessamento.
-6. `event_outbox.payload` segue as mesmas regras do `job_queue.payload` — não incluir dados sensíveis que não precisam ser transmitidos aos clientes WebSocket.
+1. Payload do broker deve carregar apenas o mínimo necessário.
+2. Usar TLS nas conexões com RabbitMQ e PostgreSQL.
+3. Separar credenciais por papel: API, publisher, worker, relay de eventos e relay de auditoria.
+4. Aplicar permissões mínimas em exchanges, queues e vhosts do RabbitMQ.
+5. Não usar `NOTIFY` como canal de dados sensíveis; apenas wake-up.
+6. `event_outbox` e `audit_outbox` devem seguir política explícita de mascaramento e retenção.
 
-## 15. Implementação de Referência (esqueleto)
+## 17. Resumo da Arquitetura Final
 
 ```text
-startup worker:
-  - registrar worker_id em worker_registry
-  - abrir conexao dedicada para LISTEN job_queue_new
-  - iniciar loop de claim/process/ack
-  - iniciar polling fallback a cada X segundos
-  - iniciar heartbeat periodico em worker_registry
+[Aplicacao]
+  -> grava negocio + job_queue + message_outbox no PostgreSQL
+  -> commit
+  -> pg_notify('queue_publish', queue_name)
 
-loop worker:
-  - claim de lote com FOR UPDATE SKIP LOCKED
-  - para cada job:
-    - processar idempotente
-    - gravar entrada em job_execution_history
-    - sucesso: DONE + gravar evento em event_outbox (mesma transacao)
-    - falha transitoria: RETRY com backoff + gravar evento em event_outbox
-    - falha permanente: FAILED (DLQ) + gravar evento em event_outbox
+[Outbox Publisher]
+  -> LISTEN queue_publish
+  -> le message_outbox
+  -> publica no RabbitMQ
+  -> marca publicado
 
-outbox relay (processo separado):
-  - ler eventos PENDING de event_outbox ordenados por outbox_id
-  - entregar via WebSocket aos clientes conectados (QueueEventHub)
-  - marcar como SENT
-  - em falha de entrega: incrementar attempts e agendar next_attempt_at
+[RabbitMQ]
+  -> exchange
+  -> queue principal
+  -> retry queue
+  -> DLQ
 
-housekeeping:
-  - reconciliar PROCESSING expirado (usando locked_at e worker_registry)
-  - expurgo de DONE antigos por politica
-  - expurgo de event_outbox SENT antigos
-  - dashboard e alertas
+[Worker]
+  -> consome mensagem
+  -> processa
+  -> atualiza job_queue + job_execution_history + event_outbox
+  -> ack/nack
+
+[OutboxRelay]
+  -> le event_outbox
+  -> envia WebSocket para monitor
+
+[AuditRelay]
+  -> LISTEN audit_change no PostgreSQL
+  -> le audit_outbox
+  -> grava em base de auditoria separada
 ```
 
-## 16. Trade-offs
-
-Vantagens:
-
-- Menos componentes de infraestrutura
-- Transação única entre negócio, fila e publicação de evento (outbox)
-- Operação simples para cenários moderados
-- Rastreabilidade completa: `job_execution_history` e `event_outbox` formam um audit trail nativo
-
-Custos:
-
-- Banco passa a concentrar mais carga (fila + outbox + histórico)
-- Menos recursos nativos de roteamento que brokers dedicados
-- Requer disciplina de tuning SQL e housekeeping
-- Conexão de LISTEN precisa ser separada do pool se PgBouncer for usado em `transaction pooling`
-
-## 17. Checklist de Produção
-
-1. Tabela de fila com índices e deduplicação criada.
-2. Claim com `FOR UPDATE SKIP LOCKED` validado.
-3. Retry com backoff e DLQ implementados.
-4. Reconciliação de jobs presos ativa (baseada em `locked_at` e `worker_registry`).
-5. LISTEN/NOTIFY configurado como wake-up, com polling fallback.
-6. Idempotência do consumidor testada.
+Nesta arquitetura, RabbitMQ maximiza a escala do transporte, PostgreSQL continua como base natural dos projetos que já o utilizam, e `LISTEN/NOTIFY` permanece útil onde ele faz mais sentido: wake-up pós-commit para o publisher e auditoria de mudanças do banco, não transporte da fila de alta vazão.
 7. `event_outbox` escrito na mesma transação de cada transição de status.
 8. `OutboxRelay` entregando eventos via WebSocket com retry próprio.
 9. Dashboards e alertas operacionais publicados.

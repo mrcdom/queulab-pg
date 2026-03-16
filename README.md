@@ -256,27 +256,58 @@ Variaveis configuraveis:
 - `MIN_EFFICIENCY` (padrao: `0.90`)
 - `DB_RESET_MODE` (`auto`, `required`, `off`; padrao: `auto`)
 - `PSQL_PATH` (caminho absoluto do `psql`, opcional)
+- `QUEUE_TRANSPORT` (`postgres` ou `rabbitmq`; padrao: `rabbitmq`)
+- `BENCHMARK_QUEUE_NAME` (opcional; quando definido, fixa a fila/rota usada em todos os pontos de teste)
+- `QUEUE_RABBIT_HOST` (padrao: `127.0.0.1`)
+- `QUEUE_RABBIT_PORT` (padrao: `5672`)
+- `QUEUE_RABBIT_EXCHANGE` (padrao: `jobs.direct`)
+- `QUEUE_RABBIT_QUEUE` (padrao: `notification.send.q`)
+- `QUEUE_RABBIT_ROUTING_KEY` (padrao: `notification.send`)
 
 Observacao para execucao por IA:
 
 - Se o ambiente nao tiver `psql`, o script segue em `DB_RESET_MODE=auto` sem `TRUNCATE` e isola os testes por nome de fila por rodada.
 - Para forcar a instalacao local do PostgreSQL 17: `PSQL_PATH=/Users/mrcdom/Works/services/pgsql17/bin/psql`.
 
-## Perfil estavel recomendado
+Observacao para RabbitMQ:
+
+- Se os workers estiverem vinculados a uma routing key/fila fixa (ex.: `notification.send`), defina `BENCHMARK_QUEUE_NAME=notification.send` para evitar backlog artificial por roteamento sem consumidor.
+
+## Resultados de benchmark (mar/2026)
+
+Foram executadas matrizes comparativas com os mesmos parametros em `QUEUE_TRANSPORT=postgres` e `QUEUE_TRANSPORT=rabbitmq`.
+
+Resumo consolidado:
+
+| Matriz | PostgreSQL-only (safe capacity) | RabbitMQ (safe capacity) | Leitura prática |
+| --- | --- | --- | --- |
+| `workers=2 4 8`, `rates=5 10 15` | `workers=8, rate=15, throughput=15.85 jobs/s` | `workers=8, rate=15, throughput=15.65 jobs/s` | Diferenca pequena; empate tecnico. |
+| `workers=8 12 16`, `rates=20 30 40` | `workers=16, rate=30, throughput=30.97 jobs/s` | `workers=16, rate=30, throughput=30.97 jobs/s` | Empate tecnico. |
+| `workers=16 24 32`, `rates=50 70 90` | `workers=24, rate=50, throughput=50.26 jobs/s` | `workers=24, rate=50, throughput=50.11 jobs/s` | Empate tecnico (RabbitMQ ~0.28% abaixo neste ponto). |
+
+Conclusao dos testes atuais:
+
+- Nao houve ganho relevante de throughput bruto com RabbitMQ neste hardware/perfil de carga.
+- O beneficio do RabbitMQ aparece mais em aspectos operacionais (desacoplamento, roteamento, elasticidade e governanca), nao em capacidade maxima observada neste experimento.
+
+
+## Perfil estável recomendado
 
 Com base nos benchmarks recentes deste equipamento:
 
-- configuracao recomendada: `QUEUE_WORKER_THREADS=10`
-- capacidade segura observada: `20 jobs/s`
-- alvo operacional recomendado: `16 jobs/s` (margem de seguranca)
+- configuracao estavel validada: `QUEUE_WORKER_THREADS=24`
+- capacidade segura observada: `50 jobs/s`
+- alvo operacional recomendado: `40 jobs/s` (margem de seguranca de 20%)
 
-Para subir a API no perfil estavel:
+Comando de referencia (matriz agressiva):
 
 ```bash
-./scripts/start-stable-profile.sh
+WORKER_THREADS_LIST='16 24 32' TARGET_RATES='50 70 90' WARMUP_SECONDS='10' MEASURE_SECONDS='35' SAMPLE_INTERVAL_SECONDS='5' DB_RESET_MODE='required' PSQL_PATH='/Users/mrcdom/Works/services/pgsql17/bin/psql' API_PORT='7100' QUEUE_TRANSPORT='postgres' ./scripts/run-capacity-benchmark-ai.sh
+
+WORKER_THREADS_LIST='16 24 32' TARGET_RATES='50 70 90' WARMUP_SECONDS='10' MEASURE_SECONDS='35' SAMPLE_INTERVAL_SECONDS='5' DB_RESET_MODE='required' PSQL_PATH='/Users/mrcdom/Works/services/pgsql17/bin/psql' API_PORT='7101' QUEUE_TRANSPORT='rabbitmq' BENCHMARK_QUEUE_NAME='notification.send' QUEUE_RABBIT_QUEUE='notification.send.q' QUEUE_RABBIT_ROUTING_KEY='notification.send' QUEUE_RABBIT_EXCHANGE='jobs.direct' ./scripts/run-capacity-benchmark-ai.sh
 ```
 
-O script aplica migracoes e inicia a API com os parametros recomendados.
+O script aplica migrações e inicia a API com os parâmetros recomendados.
 
 ## Cenarios predefinidos
 

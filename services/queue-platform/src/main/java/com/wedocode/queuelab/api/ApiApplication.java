@@ -6,6 +6,8 @@ import com.wedocode.queuelab.core.DataSourceFactory;
 import com.wedocode.queuelab.core.QueueService;
 import com.wedocode.queuelab.core.QueueRepository;
 import com.wedocode.queuelab.worker.NotificationJobProcessor;
+import com.wedocode.queuelab.worker.RabbitOutboxPublisher;
+import com.wedocode.queuelab.worker.RabbitWorkerRuntime;
 import com.wedocode.queuelab.worker.WorkerRuntime;
 import io.javalin.Javalin;
 import io.javalin.http.HttpStatus;
@@ -27,13 +29,27 @@ public final class ApiApplication {
     var outboxRelay = new OutboxRelay(repository, eventHub, eventMetrics);
     outboxRelay.start();
 
+    RabbitOutboxPublisher brokerPublisher = null;
+    if (config.useRabbitTransport()) {
+      brokerPublisher = new RabbitOutboxPublisher(dataSource, repository, config);
+      brokerPublisher.start();
+    }
+
     WorkerRuntime embeddedRuntime = null;
+    RabbitWorkerRuntime embeddedRabbitRuntime = null;
     if (config.startEmbeddedWorkers()) {
-      embeddedRuntime = new WorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
-      embeddedRuntime.start();
+      if (config.useRabbitTransport()) {
+        embeddedRabbitRuntime = new RabbitWorkerRuntime(repository, config, new NotificationJobProcessor(config));
+        embeddedRabbitRuntime.start();
+      } else {
+        embeddedRuntime = new WorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
+        embeddedRuntime.start();
+      }
     }
 
     var runtimeReference = embeddedRuntime;
+    var rabbitRuntimeReference = embeddedRabbitRuntime;
+    var brokerPublisherReference = brokerPublisher;
     var app = Javalin.create(configuration -> {
       configuration.jsonMapper(new JavalinJackson());
       configuration.showJavalinBanner = false;
@@ -124,8 +140,14 @@ public final class ApiApplication {
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
       outboxRelay.stop();
+      if (brokerPublisherReference != null) {
+        brokerPublisherReference.stop();
+      }
       if (runtimeReference != null) {
         runtimeReference.stop();
+      }
+      if (rabbitRuntimeReference != null) {
+        rabbitRuntimeReference.stop();
       }
     }));
 

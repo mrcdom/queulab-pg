@@ -33,6 +33,10 @@ MAX_FAILED_RATE="${MAX_FAILED_RATE:-0.005}"
 MIN_EFFICIENCY="${MIN_EFFICIENCY:-0.90}"
 DB_RESET_MODE="${DB_RESET_MODE:-auto}"
 PSQL_PATH="${PSQL_PATH:-}"
+BENCHMARK_QUEUE_NAME="${BENCHMARK_QUEUE_NAME:-}"
+QUEUE_TRANSPORT="${QUEUE_TRANSPORT:-rabbitmq}"
+QUEUE_RABBIT_HOST="${QUEUE_RABBIT_HOST:-127.0.0.1}"
+QUEUE_RABBIT_PORT="${QUEUE_RABBIT_PORT:-5672}"
 
 mkdir -p "$RESULTS_DIR" "$API_LOG_DIR"
 
@@ -89,6 +93,27 @@ wait_health() {
   return 1
 }
 
+ensure_rabbit_available() {
+  if [[ "${QUEUE_TRANSPORT,,}" != "rabbitmq" ]]; then
+    return
+  fi
+
+  if command -v nc >/dev/null 2>&1; then
+    if ! nc -z "$QUEUE_RABBIT_HOST" "$QUEUE_RABBIT_PORT" >/dev/null 2>&1; then
+      echo "RabbitMQ indisponivel em $QUEUE_RABBIT_HOST:$QUEUE_RABBIT_PORT (QUEUE_TRANSPORT=rabbitmq)."
+      echo "Suba o broker antes do benchmark, por exemplo: /Users/mrcdom/Works/services/rabbitmq/run.sh"
+      exit 1
+    fi
+    return
+  fi
+
+  if ! (echo >"/dev/tcp/$QUEUE_RABBIT_HOST/$QUEUE_RABBIT_PORT") >/dev/null 2>&1; then
+    echo "RabbitMQ indisponivel em $QUEUE_RABBIT_HOST:$QUEUE_RABBIT_PORT (QUEUE_TRANSPORT=rabbitmq)."
+    echo "Suba o broker antes do benchmark, por exemplo: /Users/mrcdom/Works/services/rabbitmq/run.sh"
+    exit 1
+  fi
+}
+
 apply_migrations() {
   log "Aplicando migracoes..."
   QUEUE_DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$DB_NAME" \
@@ -133,6 +158,15 @@ start_api() {
   QUEUE_API_PORT="$API_PORT" \
   QUEUE_START_EMBEDDED_WORKERS="true" \
   QUEUE_WORKER_THREADS="$workers" \
+  QUEUE_TRANSPORT="$QUEUE_TRANSPORT" \
+  QUEUE_RABBIT_HOST="$QUEUE_RABBIT_HOST" \
+  QUEUE_RABBIT_PORT="$QUEUE_RABBIT_PORT" \
+  QUEUE_RABBIT_USER="${QUEUE_RABBIT_USER:-guest}" \
+  QUEUE_RABBIT_PASSWORD="${QUEUE_RABBIT_PASSWORD:-guest}" \
+  QUEUE_RABBIT_VHOST="${QUEUE_RABBIT_VHOST:-/}" \
+  QUEUE_RABBIT_EXCHANGE="${QUEUE_RABBIT_EXCHANGE:-jobs.direct}" \
+  QUEUE_RABBIT_QUEUE="${QUEUE_RABBIT_QUEUE:-notification.send.q}" \
+  QUEUE_RABBIT_ROUTING_KEY="${QUEUE_RABBIT_ROUTING_KEY:-notification.send}" \
   mvn -q -f "$POM_PATH" exec:java -Dexec.mainClass=com.wedocode.queuelab.api.ApiApplication >"$api_log" 2>&1 &
 
   api_pid=$!
@@ -256,6 +290,9 @@ run_point() {
   local workers="$1"
   local rate="$2"
   local queue_name="benchmark.w${workers}.r${rate}.$TIMESTAMP"
+  if [[ -n "$BENCHMARK_QUEUE_NAME" ]]; then
+    queue_name="$BENCHMARK_QUEUE_NAME"
+  fi
 
   reset_tables
   start_api "$workers"
@@ -404,6 +441,7 @@ printf "timestamp,workers,rate,phase,elapsed_sec,pending,processing,retry,done,f
 
 log "Inicio do benchmark AI-first"
 log "Resultados em: $RESULTS_DIR"
+ensure_rabbit_available
 
 apply_migrations
 
