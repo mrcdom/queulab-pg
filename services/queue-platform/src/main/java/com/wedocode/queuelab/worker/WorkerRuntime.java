@@ -2,7 +2,6 @@ package com.wedocode.queuelab.worker;
 
 import com.wedocode.queuelab.core.AppConfig;
 import com.wedocode.queuelab.core.QueueJob;
-import com.wedocode.queuelab.core.QueueRepository;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -16,7 +15,7 @@ import org.postgresql.PGConnection;
 
 public final class WorkerRuntime {
   private final DataSource dataSource;
-  private final QueueRepository repository;
+  private final WorkerRuntimeRepository repository;
   private final AppConfig config;
   private final JobProcessor processor;
   private final AtomicBoolean running = new AtomicBoolean(false);
@@ -26,7 +25,7 @@ public final class WorkerRuntime {
   private Thread listenerThread;
   private final String runtimeId = UUID.randomUUID().toString().substring(0, 8);
 
-  public WorkerRuntime(DataSource dataSource, QueueRepository repository, AppConfig config, JobProcessor processor) {
+  public WorkerRuntime(DataSource dataSource, WorkerRuntimeRepository repository, AppConfig config, JobProcessor processor) {
     this.dataSource = dataSource;
     this.repository = repository;
     this.config = config;
@@ -38,14 +37,12 @@ public final class WorkerRuntime {
       return;
     }
 
-    listenerThread = new Thread(this::listenForNotifications, "queue-listener");
-    listenerThread.start();
+    listenerThread = Thread.ofVirtual().name("queue-listener").start(this::listenForNotifications);
 
     for (int index = 0; index < config.workerThreads(); index++) {
       var workerId = "worker-" + runtimeId + "-" + index;
-      var thread = new Thread(() -> runWorkerLoop(workerId), workerId);
+      var thread = Thread.ofVirtual().name(workerId).start(() -> runWorkerLoop(workerId));
       workerThreads.add(thread);
-      thread.start();
     }
   }
 

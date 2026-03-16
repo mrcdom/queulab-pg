@@ -185,3 +185,92 @@ Este plano prioriza execução por IA com passos determinísticos, artefatos ver
 - [x] FIX-C04 - Reforçar fallback por polling quando canal WebSocket não estiver conectado.
 - [x] Validação backend: `mvn -q -f services/queue-platform/pom.xml test`.
 - [x] Validação frontend: `npm --prefix apps/web-console run build`.
+
+## Fase VT: Planejamento para Virtual Threads (Java 21)
+
+### VT00 - Levantar baseline de concorrência atual
+
+- [x] Entradas: runtime de workers, relay da outbox, processor de jobs e hooks de shutdown.
+- [x] Ação: mapear uso atual de threads de plataforma e pontos de bloqueio.
+- [x] Arquivo-alvo: documentação deste plano.
+- [x] Gate: inventário completo com decisões por componente.
+
+### VT01 - Definir estratégia de migração por componente
+
+- [x] Entradas: inventário VT00 e restrições de arquitetura da fila com PostgreSQL.
+- [x] Ação: decidir o que migrar para virtual thread imediatamente e o que manter em thread dedicada.
+- [x] Arquivo-alvo: documentação deste plano.
+- [x] Gate: decisão explícita por componente com justificativa técnica.
+
+### VT10 - Migrar execução dos workers para virtual threads
+
+- [x] Entradas: `WorkerRuntime` e configuração de quantidade de workers.
+- [x] Ação: substituir criação manual de `Thread` por fábrica/executor de virtual threads para loops de workers.
+- [x] Arquivo-alvo: services/queue-platform/src/main/java/com/wedocode/queuelab/worker/WorkerRuntime.java.
+- [x] Gate: workers inicializam e processam jobs mantendo semântica de claim e retry.
+
+### VT11 - Revisar listener de LISTEN/NOTIFY
+
+- [x] Entradas: loop de notificação PostgreSQL no `WorkerRuntime`.
+- [x] Ação: manter listener em execução dedicada previsível ou migrar para virtual thread isolada com estratégia de reconexão.
+- [x] Arquivo-alvo: services/queue-platform/src/main/java/com/wedocode/queuelab/worker/WorkerRuntime.java.
+- [x] Gate: wake-up de workers continua funcional após reconexões e interrupções.
+
+### VT12 - Migrar scheduler do relay da outbox
+
+- [x] Entradas: `OutboxRelay` com `ScheduledExecutorService` single-thread.
+- [x] Ação: adotar scheduler compatível com virtual threads para execução de lotes sem regressão.
+- [x] Arquivo-alvo: services/queue-platform/src/main/java/com/wedocode/queuelab/api/OutboxRelay.java.
+- [x] Gate: relay continua publicando, marcando `sent/failed` e atualizando métricas.
+
+### VT13 - Ajustar hooks de shutdown e ciclo de vida
+
+- [x] Entradas: hooks em `ApiApplication` e `WorkerApplication`.
+- [x] Ação: garantir desligamento ordenado de executores virtuais e término limpo da aplicação.
+- [x] Arquivo-alvo: services/queue-platform/src/main/java/com/wedocode/queuelab/api/ApiApplication.java, services/queue-platform/src/main/java/com/wedocode/queuelab/worker/WorkerApplication.java.
+- [x] Gate: stop gracioso sem threads órfãs e sem perda de consistência de status.
+
+### VT14 - Revisar processor para interrupção e bloqueios
+
+- [x] Entradas: `NotificationJobProcessor` e uso de sleeps/bloqueios.
+- [x] Ação: validar que interrupções e falhas são tratadas sem mascarar cancelamento em virtual threads.
+- [x] Arquivo-alvo: services/queue-platform/src/main/java/com/wedocode/queuelab/worker/NotificationJobProcessor.java.
+- [x] Gate: interrupção preservada e comportamento determinístico sob cancelamento.
+
+### VT20 - Adicionar testes de regressão de concorrência
+
+- [x] Entradas: cenários de claim concorrente, retry e reconciliação.
+- [x] Ação: criar/ajustar testes cobrindo processamento concorrente com virtual threads.
+- [x] Arquivo-alvo: services/queue-platform/src/test/java/com/wedocode/queuelab/worker (novos testes) e testes de integração relevantes.
+- [x] Gate: testes capturam regressão de duplicidade de processamento e ordem de transições.
+
+### VT21 - Validar benchmark mínimo comparativo
+
+- [x] Entradas: script de benchmark existente.
+- [x] Ação: executar cenário comparando baseline atual versus versão com virtual threads.
+- [x] Arquivo-alvo: artefatos gerados em `.tmp/capacity-benchmark-*`.
+- [x] Comando-gate: `WORKER_THREADS_LIST='2 4 8' TARGET_RATES='5 10 15' WARMUP_SECONDS='5' MEASURE_SECONDS='20' SAMPLE_INTERVAL_SECONDS='5' DB_RESET_MODE='required' PSQL_PATH='/Users/mrcdom/Works/services/pgsql17/bin/psql' API_PORT='7080' QUEUE_TRANSPORT='postgres' ./scripts/run-capacity-benchmark-ai.sh`.
+- [x] Saída esperada: relatório comparativo com throughput, latência e taxa de falhas.
+
+### VT22 - Validação final e documentação
+
+- [x] Entradas: tarefas VT10-VT21 concluídas.
+- [x] Ação: validar build/test e registrar impacto técnico da migração.
+- [x] Arquivo-alvo: docs/planejamento.md (se necessário), tasks/todo.md (revisão final).
+- [x] Comando-gate: `mvn -q -f services/queue-platform/pom.xml test`.
+- [x] Saída esperada: suíte verde e critérios de sucesso documentados.
+
+## Critérios de Sucesso da Fase VT
+
+- [x] Não há regressão funcional no fluxo de enqueue, claim, processamento, retry, DLQ e outbox.
+- [x] Desligamento da aplicação permanece previsível e sem vazamento de execução.
+- [ ] Ganho de eficiência observado em pelo menos um cenário de benchmark sem perda de estabilidade.
+
+## Revisão da Execução VT (2026-03-16)
+
+- [x] Tarefas concluídas nesta execução: VT00, VT01, VT10, VT11, VT12, VT13, VT14, VT20, VT21, VT22.
+- [x] Validação executada: `mvn -q -f services/queue-platform/pom.xml test`.
+- [x] Benchmark executado: `.tmp/capacity-benchmark-20260316-122254`.
+- [x] Resultado benchmark: capacidade segura em workers=8, rate=15, throughput=15.6500, failed_rate=0.
+- [x] Comparação com baseline equivalente (`.tmp/capacity-benchmark-20260316-090314`): resultado estável, sem ganho mensurável adicional.
+- [ ] Pendência de produto: investigar tuning para ganho de throughput (batch, latência simulada, DB pool e configuração de claim).

@@ -2,29 +2,23 @@ package com.wedocode.queuelab.api;
 
 import com.wedocode.queuelab.core.JsonSupport;
 import com.wedocode.queuelab.core.QueueRepository;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public final class OutboxRelay {
+  private static final long INITIAL_DELAY_MILLIS = 100L;
+  private static final long RELAY_INTERVAL_MILLIS = 250L;
   private static final Logger LOGGER = LoggerFactory.getLogger(OutboxRelay.class);
   private final QueueRepository repository;
   private final QueueEventHub eventHub;
   private final EventChannelMetrics metrics;
-  private final ScheduledExecutorService scheduler;
   private volatile boolean started;
+  private Thread relayThread;
 
   public OutboxRelay(QueueRepository repository, QueueEventHub eventHub, EventChannelMetrics metrics) {
     this.repository = repository;
     this.eventHub = eventHub;
     this.metrics = metrics;
-    this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-      var thread = new Thread(runnable, "outbox-relay");
-      thread.setDaemon(true);
-      return thread;
-    });
   }
 
   public synchronized void start() {
@@ -32,7 +26,7 @@ public final class OutboxRelay {
       return;
     }
     started = true;
-    scheduler.scheduleWithFixedDelay(this::relayBatch, 100, 250, TimeUnit.MILLISECONDS);
+    relayThread = Thread.ofVirtual().name("outbox-relay").start(this::runRelayLoop);
   }
 
   public synchronized void stop() {
@@ -40,7 +34,31 @@ public final class OutboxRelay {
       return;
     }
     started = false;
-    scheduler.shutdownNow();
+    if (relayThread != null) {
+      relayThread.interrupt();
+    }
+  }
+
+  private void runRelayLoop() {
+    if (!sleepInterruptibly(INITIAL_DELAY_MILLIS)) {
+      return;
+    }
+    while (started) {
+      relayBatch();
+      if (!sleepInterruptibly(RELAY_INTERVAL_MILLIS)) {
+        return;
+      }
+    }
+  }
+
+  private boolean sleepInterruptibly(long milliseconds) {
+    try {
+      Thread.sleep(milliseconds);
+      return true;
+    } catch (InterruptedException exception) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
   }
 
   private void relayBatch() {

@@ -11,9 +11,9 @@ public final class WorkerApplication {
     var config = AppConfig.fromEnv();
     var dataSource = DataSourceFactory.create(config);
     var repository = new QueueRepository(dataSource);
-    var runtime = new WorkerRuntime(dataSource, repository, config, new NotificationJobProcessor(config));
+    var runtime = new WorkerRuntime(dataSource, new QueueRepositoryWorkerAdapter(repository), config, new NotificationJobProcessor(config));
 
-    Runtime.getRuntime().addShutdownHook(new Thread(runtime::stop));
+    Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("worker-shutdown").unstarted(runtime::stop));
 
     runtime.start();
     runtime.await();
