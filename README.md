@@ -214,6 +214,30 @@ VITE_API_BASE_URL=http://localhost:7070 npm run dev
 4. Observe jobs passando por `PENDING`, `PROCESSING`, `RETRY`, `DONE` e `FAILED`.
 5. Reenfileire jobs da DLQ e use a reconciliacao manual para demonstrar recovery operacional.
 
+## Screenshots da demonstracao
+
+As imagens abaixo devem ser salvas em [docs/screenshots](docs/screenshots), seguindo os nomes sugeridos em [docs/screenshots/README.md](docs/screenshots/README.md).
+
+### Dashboard
+
+![Dashboard da solucao](docs/screenshots/dashboard-overview.png)
+
+### Simulador (burst)
+
+![Simulador com envio em burst](docs/screenshots/simulator-burst.png)
+
+### Lista de jobs
+
+![Tabela de jobs](docs/screenshots/jobs-table.png)
+
+### DLQ
+
+![Tela de DLQ](docs/screenshots/dlq-view.png)
+
+### Workers
+
+![Tela de workers](docs/screenshots/workers-view.png)
+
 ## Endpoints principais
 
 - `GET /api/dashboard`
